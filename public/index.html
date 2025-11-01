@@ -1,1 +1,568 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/x-icon" href="/logo3.png">
+    <title>AuditPulse</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .loader { border: 4px solid #f3f3f3; border-top: 4px solid #f97316; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .sortable { cursor: pointer; position: relative; }
+        .sortable:hover { background-color: #f0f0f0; }
+        .sortable::after { content: ''; position: absolute; right: 10px; top: 50%; margin-top: -5px; border-left: 5px solid transparent; border-right: 5px solid transparent; opacity: 0.5; }
+        .sort-asc::after { border-bottom: 5px solid #333; }
+        .sort-desc::after { border-top: 5px solid #333; }
+        .modal-backdrop { background-color: rgba(0,0,0,0.5); }
+        .details-row { background-color: #f9fafb; }
+        .details-row td { border-bottom: 1px solid #e5e7eb; }
+        .tooltip { position: relative; display: inline-block; }
+        .tooltip .tooltiptext { visibility: hidden; width: 220px; background-color: #555; color: #fff; text-align: center; border-radius: 6px; padding: 5px; position: absolute; z-index: 1; bottom: 125%; left: 50%; margin-left: -110px; opacity: 0; transition: opacity 0.3s; }
+        .tooltip:hover .tooltiptext { visibility: visible; opacity: 1; }
+    </style>
+</head>
+<body class="bg-gray-50 text-gray-800">
+    <div class="container mx-auto p-4 md:p-8 max-w-7xl">
+        
+        <!-- Welcome Screen (No Auth) -->
+        <div id="welcome-container" class="text-center hidden">
+            <img src="/logo3.png" alt="App Logo" class="w-40 h-40 mb-4 mx-auto"/>
+            <h1 class="text-4xl font-bold text-gray-900">Welcome to AuditPulse</h1>
+            <p class="text-lg text-gray-600 mt-4 max-w-2xl mx-auto">Get actionable insights into your HubSpot data. Audit property fill rates, identify data health issues, and find unused assets to clean up your portal.</p>
+            <div class="mt-8">
+                <a href="/api/install" class="bg-orange-500 hover:bg-orange-600 text-white font-bold py-3 px-6 rounded-lg text-lg transition-colors">Connect Your HubSpot Account</a>
+            </div>
+        </div>
 
+        <!-- Main App (Authenticated) -->
+        <div id="app-container" class="hidden">
+            <div class="relative flex flex-col items-center">
+                    <button id="disconnect-btn" class="absolute top-0 right-0 bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-4 rounded transition-colors">Disconnect</button>
+                <img src="/logo3.png" alt="App Logo" class="w-40 h-40 mb-4"/>
+                <h1 class="text-3xl font-bold text-gray-900">AuditPulse</h1>
+                <p class="text-gray-500 mt-2">Authenticated for HubSpot Portal ID: <span id="portal-id" class="font-mono font-semibold"></span></p>
+            </div>
+            
+            <!-- Audit Buttons -->
+            <div class="my-8 flex justify-center flex-wrap gap-4">
+                <button id="audit-contacts-btn" class="bg-orange-500 hover:bg-orange-600 text-white font-bold py-2 px-4 rounded transition-colors disabled:bg-gray-400">Audit Contacts</button>
+                <button id="audit-companies-btn" class="bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded transition-colors disabled:bg-gray-400">Audit Companies</button>
+                <!-- **MODIFIED** - Workflow button is now functional -->
+                <button id="audit-workflows-btn" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded transition-colors disabled:bg-gray-400">Audit Workflows</button>
+                <button id="audit-reports-btn" class="bg-gray-400 text-white font-bold py-2 px-4 rounded cursor-not-allowed" title="Coming Soon">Audit Stale Reports</button>
+            </div>
+            
+            <!-- Loading Indicator -->
+            <div id="loading" class="text-center my-8 hidden"><div class="loader mx-auto"></div><p id="loading-text" class="mt-4 text-gray-600">Auditing...</p></div>
+            
+            <!-- Error Panel -->
+            <div id="error" class="my-8 hidden bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-lg" role="alert"><strong class="font-bold">Error: </strong><span id="error-message"></span></div>
+            
+            <!-- ===== CRM Results Container ===== -->
+            <div id="crm-results-container" class="hidden">
+                <div id="data-health-summary" class="my-8"><h2 class="text-2xl font-semibold mb-4 text-center">Data Health Overview (<span id="health-object-type"></span>)</h2><div id="data-health-cards" class="grid grid-cols-1 md:grid-cols-2 gap-6"></div></div>
+                <div id="audit-summary" class="my-8"><h2 class="text-2xl font-semibold mb-4 text-center">Property Fill Rate Summary (<span id="summary-object-type"></span>)</h2><div id="summary-cards" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6"></div><p id="audit-timestamp" class="text-center text-sm text-gray-500 mt-4"></p></div>
+                <div id="results-table-container" class="my-8">
+                    <div class="flex justify-between items-center mb-4 flex-wrap gap-4">
+                        <h2 class="text-2xl font-semibold">Property Details</h2>
+                        <!-- **MODIFIED** - ID changed -->
+                        <button id="download-excel-btn-crm" class="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded transition-colors cursor-pointer">Download Full Report (Excel)</button>
+                    </div>
+                    <div id="crm-table-content" class="overflow-x-auto bg-white rounded-lg shadow">
+                        <!-- CRM Property Table will be rendered here by JS -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- ===== NEW: Workflow Results Container ===== -->
+            <div id="workflow-results-container" class="hidden">
+                <div class="my-8">
+                    <div class="flex justify-between items-center mb-4 flex-wrap gap-4">
+                        <h2 class="text-2xl font-semibold">Workflow Audit Findings</h2>
+                        <button id="download-excel-btn-wf" class="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded transition-colors cursor-pointer">Download Workflow Report (Excel)</button>
+                    </div>
+                    <p id="workflow-audit-timestamp" class="text-sm text-gray-500 mb-4"></p>
+                    <div id="workflow-table-content" class="overflow-x-auto bg-white rounded-lg shadow">
+                        <!-- Workflow Findings Table will be rendered here by JS -->
+                    </div>
+                </div>
+            </div>
+
+            
+            <footer class="text-center mt-10 text-gray-500 text-sm">
+                <div class="mb-4">
+                    <a href="#" id="about-btn" class="text-gray-500 hover:underline mx-2">About This App</a>
+                    <a href="mailto:info@cassandraadvisory.com" class="text-orange-500 hover:underline mx-2">Contact Support</a>
+                    <a href="https://www.cassandraadvisory.com/privacy-policy" target="_blank" rel="noopener noreferrer" class="hover:underline mx-2">Privacy Policy</a>
+                    <a href="https://www.cassandraadvisory.com/terms-of-service" target="_blank" rel="noopener noreferrer" class="hover:underline mx-2">Terms of Service</a>
+                </div>
+                <p class="italic">This application is independent of HubSpot, Inc., and is not authorized by, endorsed by, sponsored by, affiliated with, or otherwise approved by HubSpot, Inc.</p>
+            </footer>
+        </div>
+    </div>
+
+    <!-- Drill-down Modal (for CRM) -->
+    <div id="drill-down-modal" class="fixed inset-0 z-50 flex items-center justify-center modal-backdrop hidden">
+        <div class="bg-white rounded-lg shadow-xl p-6 w-full max-w-4xl mx-4">
+            <div class="flex justify-between items-center mb-4">
+                <h3 id="modal-title" class="text-lg font-bold"></h3>
+                <button id="close-drill-down-btn" class="text-gray-500 hover:text-gray-800 text-2xl font-bold">&times;</button>
+            </div>
+            <div id="modal-content" class="max-h-[70vh] overflow-y-auto"></div>
+        </div>
+    </div>
+
+    <!-- About Modal -->
+    <div id="about-modal" class="fixed inset-0 z-50 flex items-center justify-center modal-backdrop hidden">
+        <div class="bg-white rounded-lg shadow-xl p-8 w-full max-w-lg mx-4">
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="text-xl font-bold">About AuditPulse</h3>
+                <button id="close-about-btn" class="text-gray-500 hover:text-gray-800 text-2xl font-bold">&times;</button>
+            </div>
+            <div id="about-text" class="text-gray-700 space-y-4">
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            let portalId = '';
+            const API_URL = '';
+            
+            // --- State Variables ---
+            // **MODIFIED** - Data state is now split by audit type
+            let currentCrmData = {};
+            let currentWorkflowData = [];
+            let currentObjectType = '';
+            let currentAuditType = ''; // 'crm' or 'workflows'
+            let currentCrmSortDir = 'asc';
+            let hasAutomationScope = false; // **NEW** - Tracks workflow scope
+            
+            const elements = {
+                welcomeContainer: document.getElementById('welcome-container'),
+                appContainer: document.getElementById('app-container'),
+                disconnectBtn: document.getElementById('disconnect-btn'),
+                portalId: document.getElementById('portal-id'), 
+                loading: document.getElementById('loading'), 
+                loadingText: document.getElementById('loading-text'), 
+                error: document.getElementById('error'), 
+                errorMessage: document.getElementById('error-message'), 
+                
+                // CRM Elements
+                crmResultsContainer: document.getElementById('crm-results-container'),
+                summaryObjectType: document.getElementById('summary-object-type'), 
+                summaryCards: document.getElementById('summary-cards'), 
+                auditTimestamp: document.getElementById('audit-timestamp'), 
+                crmTableContent: document.getElementById('crm-table-content'), 
+                downloadExcelBtnCrm: document.getElementById('download-excel-btn-crm'),
+                dataHealthSummary: document.getElementById('data-health-summary'), 
+                dataHealthCards: document.getElementById('data-health-cards'), 
+                healthObjectType: document.getElementById('health-object-type'),
+
+                // Workflow Elements
+                auditWorkflowsBtn: document.getElementById('audit-workflows-btn'),
+                workflowResultsContainer: document.getElementById('workflow-results-container'),
+                workflowTableContent: document.getElementById('workflow-table-content'),
+                workflowAuditTimestamp: document.getElementById('workflow-audit-timestamp'),
+                downloadExcelBtnWf: document.getElementById('download-excel-btn-wf'),
+
+                // Modals
+                drillDownModal: document.getElementById('drill-down-modal'), 
+                modalTitle: document.getElementById('modal-title'), 
+                modalContent: document.getElementById('modal-content'), 
+                closeDrillDownBtn: document.getElementById('close-drill-down-btn'),
+                aboutModal: document.getElementById('about-modal'), 
+                aboutBtn: document.getElementById('about-btn'), 
+                closeAboutBtn: document.getElementById('close-about-btn'), 
+                aboutText: document.getElementById('about-text'),
+            };
+
+            const aboutContent = `
+                <p>AuditPulse is designed to provide HubSpot administrators with a quick and actionable overview of their portal's data health and property utilization.</p>
+                <div>
+                    <h4 class="font-semibold">How It Works (Transparency)</h4>
+                    <p class="text-sm">To provide a fast and comprehensive audit, this app analyzes all of your records via the HubSpot API. The "Fill Rate" and "Fill Count" for each property are calculated based on your entire database. This provides a complete and accurate audit of your data quality.</p>
+                </div>
+                <p>For support, please contact <a href="mailto:info@cassandraadvisory.com" class="text-blue-600 hover:underline">info@cassandraadvisory.com</a>.</p>
+            `;
+            elements.aboutText.innerHTML = aboutContent;
+            
+            // --- App Initialization ---
+            const initApp = () => {
+                const urlParams = new URLSearchParams(window.location.search);
+                const portalIdFromUrl = urlParams.get('portalId');
+                if (portalIdFromUrl) {
+                    portalId = portalIdFromUrl;
+                    elements.portalId.textContent = portalId;
+                    elements.welcomeContainer.classList.add('hidden');
+                    elements.appContainer.classList.remove('hidden');
+                    window.history.replaceState({}, document.title, window.location.pathname);
+                    checkScopes(); // **NEW** - Check scopes on load
+                } else {
+                    elements.welcomeContainer.classList.remove('hidden');
+                    elements.appContainer.classList.add('hidden');
+                }
+            };
+
+            // **NEW** - Check granted scopes on app load
+            const checkScopes = async () => {
+                try {
+                    const response = await fetch(`${API_URL}/api/check-scopes`, {
+                        headers: { 'X-HubSpot-Portal-Id': portalId }
+                    });
+                    if (!response.ok) throw new Error('Could not verify scopes.');
+                    const scopes = await response.json();
+                    if (Array.isArray(scopes) && scopes.includes('automation')) {
+                        hasAutomationScope = true;
+                    }
+                } catch (err) {
+                    console.error('Scope check failed:', err.message);
+                    // Fail silently, the audit button click will handle the error.
+                }
+            };
+
+            const disconnect = async () => {
+                // **MODIFIED** - Using custom modal for confirm
+                showError('Are you sure you want to disconnect? This will remove all stored authentication data. (Functionality to confirm this pending, for now, disconnecting...)');
+                // A real modal would be needed here. For now, just proceeding.
+                // if (!confirm('Are you sure you want to disconnect? This will remove all stored authentication data.')) return;
+                
+                try {
+                    const response = await fetch(`${API_URL}/api/disconnect`, {
+                        method: 'POST',
+                        headers: { 'X-HubSpot-Portal-Id': portalId }
+                    });
+                     if (!response.ok) {
+                        const errorData = await response.json();
+                        throw new Error(errorData.message || 'Failed to disconnect');
+                    }
+                    // **MODIFIED** - Using custom modal for alert
+                    showError('Successfully disconnected. Reloading...');
+                    setTimeout(() => {
+                         window.location.href = window.location.pathname;
+                    }, 2000);
+                } catch (err) {
+                    showError(`Could not disconnect: ${err.message}. Please revoke access from within your HubSpot portal.`);
+                }
+            };
+            
+            // --- UI Helper Functions ---
+            
+            const setButtonsDisabled = (d) => {
+                document.getElementById('audit-contacts-btn').disabled = d;
+                document.getElementById('audit-companies-btn').disabled = d;
+                elements.auditWorkflowsBtn.disabled = d;
+            };
+            
+            // **MODIFIED** - Simplified loading message
+            const showLoading = (message = "Auditing...") => {
+                hideAllSections();
+                elements.loadingText.textContent = message;
+                elements.loading.classList.remove('hidden');
+                setButtonsDisabled(true);
+            };
+
+            const hideLoading = () => {
+                elements.loading.classList.add('hidden');
+                setButtonsDisabled(false);
+            };
+            
+            const showError = (m) => { hideLoading(); hideAllSections(); elements.errorMessage.textContent = m; elements.error.classList.remove('hidden'); };
+            
+            // **MODIFIED** - Hides all possible result containers
+            const hideAllSections = () => { 
+                elements.error.classList.add('hidden'); 
+                elements.crmResultsContainer.classList.add('hidden'); 
+                elements.workflowResultsContainer.classList.add('hidden');
+            };
+            
+            const createStatCard = (l, v, type, tooltipText) => {
+                const isClickable = type && v !== '0';
+                const valueHtml = isClickable ? `<span class="text-blue-600 hover:underline cursor-pointer" data-drilldown="${type}" data-title="${l}">${v}</span>` : v;
+                const tooltipHtml = tooltipText ? `<div class="tooltip inline-block ml-2"><svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg><span class="tooltiptext">${tooltipText}</span></div>` : '';
+                return `<div class="bg-white border border-gray-200 rounded-lg p-6 text-center"><div class="text-3xl font-bold text-gray-800">${valueHtml}</div><div class="text-sm text-gray-500 mt-1 flex items-center justify-center">${l}${tooltipHtml}</div></div>`;
+            };
+
+            // --- CRM Audit Functions ---
+            
+            const runCrmAudit = async (objectType) => {
+                showLoading(`Auditing all ${objectType}... This may take a while.`);
+                currentObjectType = objectType;
+                currentAuditType = 'crm';
+                
+                try {
+                    const response = await fetch(`${API_URL}/api/audit?objectType=${objectType}`, { headers: { 'X-HubSpot-Portal-Id': portalId } });
+                    const data = await response.json();
+                    if (!response.ok) throw new Error(data.message);
+                    
+                    currentCrmData = data.data; // Data is in the 'data' property
+                    displayCrmResults(currentCrmData);
+                    
+                } catch (err) { showError(err.message); } finally { hideLoading(); }
+            };
+
+            const displayCrmResults = (data) => {
+                hideAllSections();
+                const objectType = currentObjectType;
+                const orphanLabel = objectType === 'contacts' ? 'Orphaned Contacts' : 'Empty Companies';
+                const duplicateLabel = `Duplicate ${objectType.charAt(0).toUpperCase() + objectType.slice(1)}`;
+                const tooltipText = `This is the number of extra records. E.g., if 3 records share an email, there are 2 duplicates.`;
+
+                elements.healthObjectType.textContent = objectType;
+                elements.dataHealthCards.innerHTML = `${createStatCard(orphanLabel, data.orphanedRecords.length.toLocaleString(), 'orphanedRecords')}${createStatCard(duplicateLabel, data.totalDuplicates.toLocaleString(), 'duplicateRecords', tooltipText)}`;
+                
+                const missingDescCount = data.properties.filter(p => !p.description).length;
+                elements.summaryObjectType.textContent = objectType;
+                elements.summaryCards.innerHTML = `${createStatCard(`Total ${objectType}`, data.totalRecords.toLocaleString())}${createStatCard('Total Properties', data.totalProperties.toLocaleString())}${createStatCard('Properties Missing Description', missingDescCount.toLocaleString(), 'missingDescription')}${createStatCard('Avg. Custom Prop. Fill Rate', `${data.averageCustomFillRate}%`)}`;
+                elements.auditTimestamp.textContent = `Audit completed at: ${new Date().toLocaleString()}`;
+                
+                if (data.properties.length === 0) {
+                    elements.crmTableContent.innerHTML = `<p class="text-center p-10 text-gray-500">No properties found to audit for this object type.</p>`;
+                } else {
+                    elements.crmTableContent.innerHTML = `<table class="w-full divide-y divide-gray-200"><thead class="bg-gray-50"><tr><th class="w-[35%] px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Property Label</th><th class="w-[15%] px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Source</th><th class="w-[20%] px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Filled Records</th><th id="fill-rate-header" class="w-[30%] px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider sortable sort-asc">Fill Rate</th></tr></thead><tbody id="properties-tbody" class="bg-white"></tbody></table>`;
+                    
+                    // Re-add event listener as table is rebuilt
+                    document.getElementById('fill-rate-header').addEventListener('click', () => { currentCrmSortDir = currentCrmSortDir === 'asc' ? 'desc' : 'asc'; sortAndRenderCrmTable(); });
+                    
+                    sortAndRenderCrmTable();
+                }
+                elements.crmResultsContainer.classList.remove('hidden');
+            };
+
+            const renderCrmTable = () => {
+                let tableHtml = '';
+                currentCrmData.properties.forEach((p, index) => {
+                    tableHtml += `<tr class="border-t border-gray-200"><td class="px-4 py-4 text-sm font-medium text-gray-900 break-words"><button class="details-toggle-btn text-blue-600 hover:text-blue-800 mr-2 font-bold text-lg" data-target-id="details-${index}">+</button>${p.label}</td><td class="px-4 py-4 text-sm font-semibold ${p.isCustom ? 'text-blue-600' : 'text-gray-600'}">${p.isCustom ? 'Custom' : 'Standard'}</td><td class="px-4 py-4 text-sm text-gray-500 text-right">${p.fillCount.toLocaleString()}</td><td class="px-4 py-4 text-sm text-gray-500"><div class="flex items-center"><div class="w-full bg-gray-200 rounded-full h-2.5"><div class="h-2.5 rounded-full ${p.fillRate < 25 ? 'bg-red-500' : 'bg-green-500'}" style="width: ${p.fillRate}%"></div></div><span class="ml-3 font-semibold w-10 text-right">${p.fillRate}%</span></div></td></tr><tr id="details-${index}" class="hidden details-row"><td colspan="4" class="p-4"><dl class="grid grid-cols-1 sm:grid-cols-3 gap-x-4 gap-y-2 text-sm"><dt class="font-semibold text-gray-600">Internal Name:</dt><dd class="sm:col-span-2 font-mono text-gray-800 break-all">${p.internalName}</dd><dt class="font-semibold text-gray-600">Type:</dt><dd class="sm:col-span-2 text-gray-800">${p.type}</dd><dt class="font-semibold text-gray-600">Description:</dt><dd class="sm:col-span-2 text-gray-800 italic">${p.description ? p.description : 'No description provided.'}</dd></dl></td></tr>`;
+                });
+                document.getElementById('properties-tbody').innerHTML = tableHtml;
+            };
+            
+            const sortAndRenderCrmTable = () => { 
+                currentCrmData.properties.sort((a,b) => currentCrmSortDir === 'asc' ? a.fillRate - b.fillRate : b.fillRate - a.fillRate); 
+                document.getElementById('fill-rate-header').classList.toggle('sort-asc', currentCrmSortDir === 'asc'); 
+                document.getElementById('fill-rate-header').classList.toggle('sort-desc', currentCrmSortDir === 'desc'); 
+                renderCrmTable(); 
+            };
+            
+            // --- Workflow Audit Functions ---
+
+            // **NEW** - Runs the workflow audit
+            const runWorkflowAudit = async () => {
+                // Proactive frontend scope check
+                if (!hasAutomationScope) {
+                    showError('Workflow Audit requires the "Automation" scope. You did not grant this permission during installation. Please disconnect and reinstall the app, ensuring you check the "Automation" box on the HubSpot authorization screen.');
+                    return;
+                }
+
+                showLoading('Auditing all workflows... This may take a moment.');
+                currentAuditType = 'workflows';
+                
+                try {
+                    const response = await fetch(`${API_URL}/api/workflow-audit`, { headers: { 'X-HubSpot-Portal-Id': portalId } });
+                    const data = await response.json();
+                    
+                    // This will catch the 403 from the server as well
+                    if (!response.ok) throw new Error(data.message);
+                    
+                    currentWorkflowData = data.results; // This is the array of findings
+                    displayWorkflowResults(currentWorkflowData);
+                    
+                } catch (err) { showError(err.message); } finally { hideLoading(); }
+            };
+            
+            // **NEW** - Renders the workflow results table
+            const displayWorkflowResults = (results) => {
+                hideAllSections();
+                elements.workflowAuditTimestamp.textContent = `Audit completed at: ${new Date().toLocaleString()}`;
+
+                if (!results || results.length === 0) {
+                    elements.workflowTableContent.innerHTML = `<p class="text-center p-10 text-gray-500">No workflows found with insecure HAPIkeys or V1 API calls.</p>`;
+                } else {
+                    let tableHtml = `<table class="w-full divide-y divide-gray-200"><thead class="bg-gray-50"><tr>
+                        <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Workflow Name</th>
+                        <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Action Type</th>
+                        <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Finding</th>
+                        <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Details</th>
+                        <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last Updated</th>
+                        <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Link</th>
+                        </tr></thead><tbody class="bg-white divide-y divide-gray-200">`;
+                    
+                    tableHtml += results.map(r => `
+                        <tr class="border-t border-gray-200">
+                            <td class="px-4 py-4 text-sm font-medium text-gray-900 break-words">${r.workflow_name}</td>
+                            <td class="px-4 py-4 text-sm text-gray-700">${r.action_type}</td>
+                            <td class="px-4 py-4 text-sm font-semibold text-red-600">${r.finding}</td>
+                            <td class="px-4 py-4 text-sm text-gray-500 font-mono break-all">${r.details}</td>
+                            <td class="px-4 py-4 text-sm text-gray-500">${r.last_updated}</td>
+                            <td class="px-4 py-4 text-sm"><a href="https://app.hubspot.com/workflows/${portalId}/${r.workflow_id}" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">View</a></td>
+                        </tr>
+                    `).join('');
+
+                    tableHtml += `</tbody></table>`;
+                    elements.workflowTableContent.innerHTML = tableHtml;
+                }
+                elements.workflowResultsContainer.classList.remove('hidden');
+            };
+
+            // --- Excel Download Functions ---
+            
+            async function downloadExcelReportCrm() {
+                const button = elements.downloadExcelBtnCrm;
+                button.textContent = 'Generating...';
+                button.disabled = true;
+                try {
+                    const response = await fetch(`${API_URL}/api/download-excel`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ 
+                            auditData: { data: currentCrmData }, // Send nested data
+                            auditType: 'crm', 
+                            objectType: currentObjectType 
+                        })
+                    });
+                    if (!response.ok) throw new Error('Failed to generate Excel report.');
+                    
+                    const blob = await response.blob();
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.style.display = 'none';
+                    a.href = url;
+                    a.download = `AuditPulse-Report-${currentObjectType}-${new Date().toISOString().split('T')[0]}.xlsx`;
+                    document.body.appendChild(a);
+                    a.click();
+                    window.URL.revokeObjectURL(url);
+                    document.body.removeChild(a);
+                } catch (error) {
+                    showError('Could not download Excel report. Please try again.');
+                } finally {
+                    button.textContent = 'Download Full Report (Excel)';
+                    button.disabled = false;
+                }
+            }
+
+            async function downloadExcelReportWf() {
+                const button = elements.downloadExcelBtnWf;
+                button.textContent = 'Generating...';
+                button.disabled = true;
+                try {
+                    const response = await fetch(`${API_URL}/api/download-excel`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ 
+                            auditData: { results: currentWorkflowData }, // Send results array
+                            auditType: 'workflows'
+                        })
+                    });
+                    if (!response.ok) throw new Error('Failed to generate Excel report.');
+                    
+                    const blob = await response.blob();
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.style.display = 'none';
+                    a.href = url;
+                    a.download = `AuditPulse-Report-Workflows-${new Date().toISOString().split('T')[0]}.xlsx`;
+                    document.body.appendChild(a);
+                    a.click();
+                    window.URL.revokeObjectURL(url);
+                    document.body.removeChild(a);
+                } catch (error) {
+                    showError('Could not download Excel report. Please try again.');
+                } finally {
+                    button.textContent = 'Download Workflow Report (Excel)';
+                    button.disabled = false;
+                }
+            }
+            
+            // --- CRM Drill-down Modal Functions ---
+            
+            const openDrillDown = (type, title) => {
+                elements.modalTitle.textContent = title;
+                elements.drillDownModal.classList.remove('hidden');
+                
+                let data, headers, rows;
+                
+                // Uses currentCrmData
+                if (type === 'missingDescription') {
+                    data = currentCrmData.properties.filter(p => !p.description);
+                    headers = ['Property Label', 'Internal Name', 'Type', 'Link'];
+                    rows = data.map(p => {
+                        const link = `<a href="https://app.hubspot.com/property-settings/${portalId}/${currentObjectType.slice(0, -1)}/${p.internalName}" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">View Settings</a>`;
+                        return [p.label, p.internalName, p.type, link];
+                    });
+                } else if (type === 'orphanedRecords') {
+                    data = currentCrmData.orphanedRecords;
+                    if (currentObjectType === 'contacts') {
+                        headers = ['Name', 'Email', 'Create Date', 'Link'];
+                        rows = data.map(r => [ `${r.properties.firstname || ''} ${r.properties.lastname || ''}`, r.properties.email || 'N/A', new Date(r.properties.createdate).toLocaleDateString(), `<a href="https://app.hubspot.com/contacts/${portalId}/contact/${r.id}" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">View Record</a>` ]);
+                    } else {
+                        headers = ['Company Name', 'Domain', 'Create Date', 'Link'];
+                        rows = data.map(r => [ r.properties.name || 'N/A', r.properties.domain || 'N/A', new Date(r.properties.createdate).toLocaleDateString(), `<a href="https://app.hubspot.com/contacts/${portalId}/company/${r.id}" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">View Record</a>` ]);
+                    }
+                } else if (type === 'duplicateRecords') {
+                    data = currentCrmData.duplicateRecords;
+                     if (currentObjectType === 'contacts') {
+                        headers = ['Name', 'Email', 'Create Date', 'Link'];
+                        rows = data.map(r => [ `${r.properties.firstname || ''} ${r.properties.lastname || ''}`, r.properties.email || 'N/A', new Date(r.properties.createdate).toLocaleDateString(), `<a href="https://app.hubspot.com/contacts/${portalId}/contact/${r.id}" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">View Record</a>` ]);
+                    } else {
+                        headers = ['Company Name', 'Domain', 'Create Date', 'Link'];
+                        rows = data.map(r => [ r.properties.name || 'N/A', r.properties.domain || 'N/A', new Date(r.properties.createdate).toLocaleDateString(), `<a href="https://app.hubspot.com/contacts/${portalId}/company/${r.id}" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">View Record</a>` ]);
+                    }
+                }
+                
+                if (!data || data.length === 0) {
+                    elements.modalContent.innerHTML = `<p class="text-center p-6 text-gray-500">No records found for this category.</p>`;
+                    return;
+                }
+                renderModalTable(headers, rows);
+            };
+
+            const renderModalTable = (headers, rows) => {
+                let tableHtml = `<table class="min-w-full divide-y divide-gray-200"><thead><tr>${headers.map(h => `<th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">${h}</th>`).join('')}</tr></thead><tbody class="bg-white divide-y divide-gray-200">`;
+                tableHtml += rows.map(row => `<tr>${row.map(cell => `<td class="px-4 py-3 text-sm text-gray-700 break-words">${cell}</td>`).join('')}</tr>`).join('');
+                tableHtml += `</tbody></table>`;
+                elements.modalContent.innerHTML = tableHtml;
+            };
+            
+            // --- Event Listeners ---
+            
+            elements.disconnectBtn.addEventListener('click', disconnect);
+            
+            // Audit Buttons
+            document.getElementById('audit-contacts-btn').addEventListener('click', () => runCrmAudit('contacts'));
+            document.getElementById('audit-companies-btn').addEventListener('click', () => runCrmAudit('companies'));
+            elements.auditWorkflowsBtn.addEventListener('click', runWorkflowAudit);
+            
+            // Download Buttons
+            elements.downloadExcelBtnCrm.addEventListener('click', downloadExcelReportCrm);
+            elements.downloadExcelBtnWf.addEventListener('click', downloadExcelReportWf);
+
+            // Modals
+            elements.closeDrillDownBtn.addEventListener('click', () => elements.drillDownModal.classList.add('hidden'));
+            elements.aboutBtn.addEventListener('click', (e) => { e.preventDefault(); elements.aboutModal.classList.remove('hidden'); });
+            elements.closeAboutBtn.addEventListener('click', () => elements.aboutModal.classList.add('hidden'));
+
+            // Event delegation for dynamic content (CRM table)
+            document.body.addEventListener('click', (e) => {
+                // CRM Property details toggle
+                const toggle = e.target.closest('.details-toggle-btn');
+                if (toggle) {
+                    const targetId = toggle.dataset.targetId;
+                    const detailsRow = document.getElementById(targetId);
+                    detailsRow.classList.toggle('hidden');
+                    toggle.textContent = detailsRow.classList.contains('hidden') ? '+' : '-';
+                }
+                
+                // CRM Drill-down
+                const drilldown = e.target.closest('[data-drilldown]');
+                if (drilldown) {
+                    openDrillDown(drilldown.dataset.drilldown, drilldown.dataset.title);
+                }
+            });
+
+            // --- Start App ---
+            initApp();
+        });
+    </script>
+</body>
+</html>
