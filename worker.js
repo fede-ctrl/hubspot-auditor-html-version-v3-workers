@@ -62,7 +62,7 @@ async function getValidAccessToken(portalId) {
 
 /**
  * Fetches *all pages* of data from a HubSpot endpoint using GET.
- * This is now used for Properties and the V4 Workflow list.
+ * This is now used for Properties and the V3 Workflow list.
  */
 async function fetchAllHubSpotData(initialUrl, accessToken, resultsKey) {
     const allResults = [];
@@ -128,7 +128,7 @@ async function fetchAllHubSpotData(initialUrl, accessToken, resultsKey) {
 
 /**
  * *** THIS IS THE REAL CRM AUDIT FIX ***
- * Performs the full CRM audit (Contacts/Companies) using the 'POST /crm/v3/exports/create' API.
+ * Performs the full CRM audit (Contacts/Companies) using the 'POST /crm/v3/exports' API.
  * This has NO 10,000 record limit and avoids 414 errors.
  */
 async function performCrmAudit(job) {
@@ -163,7 +163,8 @@ async function performCrmAudit(job) {
     console.log(`[Worker] Job ${job_id}: Requesting HubSpot export for ${object_type}...`);
     await supabase.from('audit_jobs').update({ progress_message: 'Requesting HubSpot export...' }).eq('job_id', job_id);
     
-    const exportRequestUrl = 'https://api.hubapi.com/crm/v3/exports/create';
+    // *** FIX 1: Corrected Endpoint ***
+    const exportRequestUrl = 'https://api.hubapi.com/crm/v3/exports';
     const exportRequestBody = {
         objectType: object_type,
         properties: uniquePropertyNames, // Ask for all properties
@@ -322,29 +323,30 @@ async function performCrmAudit(job) {
 }
 
 /**
- * **WORKFLOW AUDIT - V4 FIX**
- * 1. Calls V4 'GET /automation/v4/workflows' to get the *complete list* of all workflows
+ * **WORKFLOW AUDIT - V3 FIX**
+ * 1. Calls V3 'GET /automation/v3/workflows' to get the *complete list* of all workflows
  * and their actions.
  */
 async function performWorkflowAudit(job) {
     const { portal_id, job_id } = job;
-    console.log(`[Worker] Job ${job_id}: Starting Workflow Audit (using V4 endpoint)...`);
+    console.log(`[Worker] Job ${job_id}: Starting Workflow Audit (using V3 endpoint)...`);
 
     await supabase.from('audit_jobs').update({ progress_message: 'Fetching access token...' }).eq('job_id', job_id);
     const accessToken = await getValidAccessToken(portal_id);
 
-    // 1. Fetch all workflow summaries using the V4 endpoint
-    await supabase.from('audit_jobs').update({ progress_message: 'Fetching workflow list (V4)...' }).eq('job_id', job_id);
+    // 1. Fetch all workflow summaries using the V3 endpoint
+    await supabase.from('audit_jobs').update({ progress_message: 'Fetching workflow list (V3)...' }).eq('job_id', job_id);
     
-    // **THE V4 FIX**
-    // This is the correct, verified endpoint for listing workflows.
-    // It returns 'results' and 'paging'
-    const workflowsUrl = 'https://api.hubapi.com/automation/v4/workflows?limit=100';
-    const allWorkflows = await fetchAllHubSpotData(workflowsUrl, accessToken, 'results');
+    // **THE V3 FIX**
+    // This is the correct, stable endpoint for listing workflows.
+    // *** FIX 2a: Corrected Endpoint ***
+    const workflowsUrl = 'https://api.hubapi.com/automation/v3/workflows?limit=100';
+    // *** FIX 2b: Corrected Data Key ('workflows' not 'results') ***
+    const allWorkflows = await fetchAllHubSpotData(workflowsUrl, accessToken, 'workflows'); 
     
-    console.log(`[Worker] Job ${job_id}: Found ${allWorkflows.length} workflow summaries from V4.`);
+    console.log(`[Worker] Job ${job_id}: Found ${allWorkflows.length} workflow summaries from V3.`);
 
-    // *** NEW: Calculate KPIs from V4 data ***
+    // *** NEW: Calculate KPIs from V3 data ***
     let kpis = {
         totalWorkflows: 0,
         inactiveWorkflows: 0,
@@ -354,7 +356,8 @@ async function performWorkflowAudit(job) {
     if (allWorkflows && allWorkflows.length > 0) {
         kpis.totalWorkflows = allWorkflows.length;
         kpis.inactiveWorkflows = allWorkflows.filter(wf => wf.enabled === false).length;
-        kpis.noEnrollmentWorkflows = allWorkflows.filter(wf => wf.activeContactCount === 0).length;
+        // *** FIX 2c: Corrected Property Name ('contactCount' not 'activeContactCount') ***
+        kpis.noEnrollmentWorkflows = allWorkflows.filter(wf => wf.contactCount === 0).length;
     }
     console.log(`[Worker] Job ${job_id}: Calculated KPIs:`, kpis);
     // *** END KPI Calculation ***
@@ -366,9 +369,9 @@ async function performWorkflowAudit(job) {
     let processedCount = 0;
 
     // 2. Loop and deep scan each workflow
-    // The V4 'GET /automation/v4/workflows' returns the *full* definition,
+    // The V3 'GET /automation/v3/workflows' returns the *full* definition,
     // including the 'actions' array. No second API call is needed. This is much faster.
-    console.log(`[Worker] Job ${job_id}: V4 endpoint returned full definitions. Starting direct scan...`);
+    console.log(`[Worker] Job ${job_id}: V3 endpoint returned full definitions. Starting direct scan...`);
     
     for (const workflowDetail of allWorkflows) {
         processedCount++;
@@ -390,8 +393,7 @@ async function performWorkflowAudit(job) {
                 let foundIssue = null;
                 let details = '';
 
-                // The V4 action structure might be different.
-                // We'll check for 'type' and 'url'/'code' properties.
+                // The V3 action structure
                 
                 if (action.type === 'WEBHOOK' && action.url) {
                     if (hapikeyPattern.test(action.url)) {
@@ -418,7 +420,8 @@ async function performWorkflowAudit(job) {
                         action_type: action.type,
                         finding: foundIssue,
                         details: details,
-                        last_updated: workflowDetail.updatedAt ? new Date(workflowDetail.updatedAt).toLocaleDateString() : 'N/A'
+                        // *** FIX 2d: Corrected Property Name ('updated' not 'updatedAt') ***
+                        last_updated: workflowDetail.updated ? new Date(workflowDetail.updated).toLocaleDateString() : 'N/A'
                     });
                 }
             }
@@ -559,4 +562,3 @@ async function startWorker() {
 }
 
 startWorker();
-
