@@ -1,7 +1,8 @@
 // This script runs on the 'auditpulsepro-worker' service.
 // It polls for jobs and executes the long-running audits.
-// FIX: REMOVED the entire 'setupDatabaseFunction' block which was crashing the worker.
-// Replaced with a simpler and more robust SELECT-then-UPDATE polling logic.
+// FIX: Rewrote performCrmAudit to use 'POST /search' endpoint.
+// This moves the 'properties' list from the URL query (causing 414 error)
+// into the request body, which has no length limit.
 
 require('dotenv').config();
 const { createClient } = require('@supabase/supabase-js');
@@ -131,7 +132,9 @@ async function fetchAllHubSpotData(initialUrl, accessToken, resultsKey) {
 // ---------------------------------
 
 /**
- * Performs the full CRM audit (Contacts/Companies) in batches to save memory.
+ * *** THIS IS THE FIXED FUNCTION ***
+ * Performs the full CRM audit (Contacts/Companies) using the /search POST endpoint
+ * This avoids the 414 URI Too Long error.
  */
 async function performCrmAudit(job) {
     const { portal_id, object_type, job_id } = job;
@@ -140,7 +143,7 @@ async function performCrmAudit(job) {
     await supabase.from('audit_jobs').update({ progress_message: 'Fetching access token...' }).eq('job_id', job_id);
     const accessToken = await getValidAccessToken(portal_id);
 
-    // 1. Fetch ALL Properties (This list is small and fits in memory)
+    // 1. Fetch ALL Properties (This is unchanged and fine)
     await supabase.from('audit_jobs').update({ progress_message: 'Fetching all properties...' }).eq('job_id', job_id);
     const propertiesUrl = `https://api.hubapi.com/crm/v3/properties/${object_type}?archived=false&limit=100`;
     const allProperties = await fetchAllHubSpotData(propertiesUrl, accessToken, 'results');
@@ -149,7 +152,7 @@ async function performCrmAudit(job) {
     const baseProps = object_type === 'contacts' ? ['associatedcompanyid', 'email'] : ['num_associated_contacts', 'domain'];
     const propertyNames = allProperties.map(p => p.name).concat(baseProps);
     const uniquePropertyNames = [...new Set(propertyNames)];
-    const propertiesQueryString = uniquePropertyNames.join(',');
+    // const propertiesQueryString = uniquePropertyNames.join(','); // We no longer need this string
 
     // --- Batch Processing Setup ---
     let totalRecords = 0;
@@ -160,14 +163,30 @@ async function performCrmAudit(job) {
     const seenDuplicateValues = new Map(); // { 'duplicate_value': { count: 2, records: [record1, record2] } }
     const duplicateIdProp = object_type === 'contacts' ? 'email' : 'domain';
 
-    let currentUrl = `https://api.hubapi.com/crm/v3/objects/${object_type}?limit=100&properties=${propertiesQueryString}`;
+    // *** NEW: Use the /search endpoint ***
+    const searchUrl = `https://api.hubapi.com/crm/v3/objects/${object_type}/search`;
+    let afterCursor = null; // The cursor for search paging
+    let hasMore = true;
     let pageCount = 0;
 
-    // 2. Fetch Records Page by Page (Batch processing loop)
-    console.log(`[Worker] Job ${job_id}: Starting batch fetch of records...`);
-    while (currentUrl) {
+    // 2. Fetch Records Page by Page (Batch processing loop using POST /search)
+    console.log(`[Worker] Job ${job_id}: Starting batch fetch of records using POST /search...`);
+    
+    while (hasMore) {
         pageCount++;
         await sleep(300); // **CRITICAL: Rate limit delay** (approx 3 calls/sec)
+
+        // Build the request body
+        const requestBody = {
+            limit: 100,
+            properties: uniquePropertyNames, // Send all 981+ properties in the body
+            filterGroups: [], // No filters, get all
+            sorts: [{ propertyName: 'createdate', direction: 'ASCENDING' }] // Need a sort for paging
+        };
+
+        if (afterCursor) {
+            requestBody.after = afterCursor; // Add the paging cursor
+        }
 
         if (pageCount % 10 === 0) { // Update Supabase every 10 pages (1,000 records)
             const progressMessage = `Fetched ${totalRecords} records (Page ${pageCount})...`;
@@ -175,12 +194,19 @@ async function performCrmAudit(job) {
             await supabase.from('audit_jobs').update({ progress_message: progressMessage }).eq('job_id', job_id);
         }
 
-        const response = await fetch(currentUrl, { headers: { 'Authorization': `Bearer ${accessToken}` } });
+        const response = await fetch(searchUrl, { 
+            method: 'POST',
+            headers: { 
+                'Authorization': `Bearer ${accessToken}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(requestBody) 
+        });
 
         if (!response.ok) {
             const errorBody = await response.text();
-            console.error(`[Worker] Job ${job_id}: HubSpot API request failed on page ${pageCount}: ${response.status} ${response.statusText}. Body: ${errorBody}`);
-            throw new Error(`[Worker] Job ${job_id}: API failed on page ${pageCount}.`);
+            console.error(`[Worker] Job ${job_id}: HubSpot API /search failed on page ${pageCount}: ${response.status} ${response.statusText}. Body: ${errorBody}`);
+            throw new Error(`[Worker] Job ${job_id}: API /search failed on page ${pageCount}.`);
         }
         
         const data = await response.json();
@@ -189,10 +215,9 @@ async function performCrmAudit(job) {
         if (recordsBatch && Array.isArray(recordsBatch) && recordsBatch.length > 0) {
             totalRecords += recordsBatch.length;
 
-            // --- Process this batch ---
+            // --- Process this batch (SAME LOGIC AS BEFORE) ---
             recordsBatch.forEach(record => {
                 if (!record.properties) return;
-
                 // A. Calculate Fill Counts
                 Object.keys(record.properties).forEach(propKey => {
                     if (fillCounts.hasOwnProperty(propKey)) {
@@ -201,21 +226,15 @@ async function performCrmAudit(job) {
                         }
                     }
                 });
-
                 // B. Check Orphans
                 if (object_type === 'contacts' && !record?.properties?.associatedcompanyid) {
-                    if (orphanedRecords.length < 5000) { // Cap orphans list to avoid memory issues
-                        orphanedRecords.push(record);
-                    }
+                    if (orphanedRecords.length < 5000) orphanRecords.push(record);
                 } else if (object_type === 'companies') {
                     const numContacts = record?.properties?.num_associated_contacts;
                     if (numContacts === null || numContacts === undefined || parseInt(numContacts, 10) === 0) {
-                        if (orphanedRecords.length < 5000) { // Cap orphans list
-                            orphanedRecords.push(record);
-                        }
+                        if (orphanedRecords.length < 5000) orphanedRecords.push(record);
                     }
                 }
-                
                 // C. Check Duplicates
                 const value = record?.properties?.[duplicateIdProp]?.toLowerCase();
                 if (value) {
@@ -224,52 +243,41 @@ async function performCrmAudit(job) {
                     }
                     const entry = seenDuplicateValues.get(value);
                     entry.count++;
-                    if (entry.records.length < 10) { // Only store a few examples of duplicates
-                        entry.records.push(record);
-                    }
+                    if (entry.records.length < 10) entry.records.push(record);
                 }
             });
             // --- End batch processing ---
 
         } else {
              // No results on this page, stop.
-             currentUrl = null;
+             hasMore = false;
              continue;
         }
 
-        // 3. Paging Logic
-        const hasPaging = data.paging && data.paging.next && (data.paging.next.link || data.paging.next.after);
-        if (hasPaging) {
-            if (data.paging.next.link) {
-                currentUrl = data.paging.next.link;
-            } else if (data.paging.next.after) {
-                const baseUrl = `https://api.hubapi.com/crm/v3/objects/${object_type}`;
-                const searchParams = new URLSearchParams(currentUrl.split('?')[1] || '');
-                searchParams.set('after', data.paging.next.after);
-                currentUrl = `${baseUrl}?${searchParams.toString()}`;
-            }
+        // 3. Paging Logic (for /search endpoint)
+        if (data.paging && data.paging.next && data.paging.next.after) {
+            afterCursor = data.paging.next.after; // Get the next cursor
         } else {
-            currentUrl = null; // No more pages
+            hasMore = false; // No more pages
         }
     } // --- End while loop (all pages fetched) ---
 
     console.log(`[Worker] Job ${job_id}: Fetched all ${totalRecords} records in ${pageCount} pages.`);
     await supabase.from('audit_jobs').update({ progress_message: 'Calculating final results...' }).eq('job_id', job_id);
 
-    // 4. Final Calculations
+    // 4. Final Calculations (SAME LOGIC AS BEFORE)
     const auditResults = allProperties.map(prop => {
         const fillCount = fillCounts[prop.name] || 0;
         const fillRate = totalRecords > 0 ? Math.round((fillCount / totalRecords) * 100) : 0;
         return { label: prop.label, internalName: prop.name, type: prop.type, description: prop.description || '', isCustom: !prop.hubspotDefined, fillRate, fillCount };
     });
 
-    // Finalize duplicate lists
     let totalDuplicates = 0;
-    const duplicateRecords = []; // Only store examples
+    const duplicateRecords = [];
     for (const [value, entry] of seenDuplicateValues.entries()) {
         if (entry.count > 1) {
-            duplicateRecords.push(...entry.records); // Add the examples
-            totalDuplicates += (entry.count - 1); // Add the "extra" ones
+            duplicateRecords.push(...entry.records);
+            totalDuplicates += (entry.count - 1);
         }
     }
 
@@ -278,17 +286,17 @@ async function performCrmAudit(job) {
         ? Math.round(customProperties.reduce((acc, p) => acc + p.fillRate, 0) / customProperties.length)
         : 0;
 
-    // 5. Format Final Results Object
+    // 5. Format Final Results Object (SAME LOGIC AS BEFORE)
     const finalResults = {
         auditType: 'crm',
         objectType: object_type,
         data: {
             totalRecords: totalRecords,
-            totalProperties: auditResults.length,
+            totalProperties: allProperties.length,
             averageCustomFillRate: averageCustomFillRate,
             properties: auditResults,
-            orphanedRecords: orphanedRecords, // This is now capped at 5000 records
-            duplicateRecords: duplicateRecords.slice(0, 5000), // Cap examples at 5000
+            orphanedRecords: orphanedRecords,
+            duplicateRecords: duplicateRecords.slice(0, 5000),
             totalDuplicates: totalDuplicates
         }
     };
@@ -298,7 +306,7 @@ async function performCrmAudit(job) {
 }
 
 /**
- * Performs the Workflow Audit. This list is small, so no batching is needed.
+ * Performs the Workflow Audit. (Unchanged)
  */
 async function performWorkflowAudit(job) {
     const { portal_id, job_id } = job;
@@ -307,7 +315,7 @@ async function performWorkflowAudit(job) {
     await supabase.from('audit_jobs').update({ progress_message: 'Fetching access token...' }).eq('job_id', job_id);
     const accessToken = await getValidAccessToken(portal_id);
 
-    // 1. Fetch all workflow summaries (small list, use fetchAll)
+    // 1. Fetch all workflow summaries
     await supabase.from('audit_jobs').update({ progress_message: 'Fetching workflow summaries...' }).eq('job_id', job_id);
     const workflowsUrl = 'https://api.hubapi.com/automation/v3/workflows?limit=100';
     const allWorkflows = await fetchAllHubSpotData(workflowsUrl, accessToken, 'workflows');
@@ -335,7 +343,7 @@ async function performWorkflowAudit(job) {
 
             if (!detailResponse.ok) {
                 console.error(`[Worker] Job ${job_id}: Failed to fetch details for workflow ${workflow.id}: ${detailResponse.statusText}`);
-                continue; // Skip this one
+                continue;
             }
 
             const workflowDetail = await detailResponse.json();
@@ -389,12 +397,11 @@ async function performWorkflowAudit(job) {
 
 // ---------------------------------
 // --- WORKER POLLING LOGIC ---
+// (This logic is now fixed and stable)
 // ---------------------------------
 
 /**
- * *** THIS IS THE FIX ***
  * Main function to poll for pending jobs using a simple SELECT-then-UPDATE.
- * This removes the need for the complex SQL function that was crashing the worker.
  */
 async function pollForJobs() {
     // console.log('[Worker] Polling for pending jobs...'); // Too noisy
@@ -464,7 +471,7 @@ async function pollForJobs() {
 
         } catch (auditError) {
             // 5. Mark job as 'failed' if an error occurs
-            console.error(`[Worker] Job ${job.job_id} FAILED:`, auditError.message, auditError.stack);
+            console.error(`[Worker] Job ${job_id} FAILED:`, auditError.message, auditError.stack);
             await supabase
                 .from('audit_jobs')
                 .update({ 
@@ -472,7 +479,7 @@ async function pollForJobs() {
                     error_message: auditError.message.substring(0, 500), // Truncate error
                     progress_message: 'Audit failed.' 
                 })
-                .eq('job_id', job.job_id);
+                .eq('job_id', job_id);
         }
         
         // Immediately poll for the next job
@@ -495,12 +502,6 @@ async function pollForJobs() {
         setTimeout(pollForJobs, 10000);
     }
 }
-
-/**
- * *** THIS FUNCTION IS NOW REMOVED ***
- * We no longer need to create a special SQL function.
- */
-// async function setupDatabaseFunction() { ... }
 
 
 /**
