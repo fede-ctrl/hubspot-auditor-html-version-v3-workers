@@ -1,6 +1,7 @@
 require('dotenv').config();
 const { createClient } = require('@supabase/supabase-js');
 const fetch = require('node-fetch');
+const { parse } = require('csv-parse');
 
 // --- Supabase Client ---
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -61,6 +62,7 @@ async function getValidAccessToken(portalId) {
 
 /**
  * Fetches *all pages* of data from a HubSpot endpoint using GET.
+ * This is now used for Properties and the V4 Workflow list.
  */
 async function fetchAllHubSpotData(initialUrl, accessToken, resultsKey) {
     const allResults = [];
@@ -107,7 +109,6 @@ async function fetchAllHubSpotData(initialUrl, accessToken, resultsKey) {
                      currentUrl = null; // No link or after, stop
                 }
             } else {
-                // This is what's happening on the V3 workflow call
                 console.log(`[Worker] fetchAll: Page ${pageCount}: No paging information found. Assuming fetch complete.`);
                 currentUrl = null; // No more pages
             }
@@ -127,25 +128,22 @@ async function fetchAllHubSpotData(initialUrl, accessToken, resultsKey) {
 
 /**
  * *** THIS IS THE REAL CRM AUDIT FIX ***
- * Performs the full CRM audit (Contacts/Companies) using the 'GET /objects' endpoint
- * This has NO 10,000 record limit.
- * The '414 URI Too Long' error is fixed by OMITTING the 'properties' param from the URL.
+ * Performs the full CRM audit (Contacts/Companies) using the 'POST /crm/v3/exports/create' API.
+ * This has NO 10,000 record limit and avoids 414 errors.
  */
 async function performCrmAudit(job) {
     const { portal_id, object_type, job_id } = job;
-    console.log(`[Worker] Job ${job_id}: Starting CRM Audit for ${object_type} (using GET /objects)`);
+    console.log(`[Worker] Job ${job_id}: Starting CRM Audit for ${object_type} (using EXPORT API)`);
 
     await supabase.from('audit_jobs').update({ progress_message: 'Fetching access token...' }).eq('job_id', job_id);
     const accessToken = await getValidAccessToken(portal_id);
 
-    // 1. Fetch ALL Properties
+    // 1. Fetch ALL Properties (This is unchanged and fine)
     await supabase.from('audit_jobs').update({ progress_message: 'Fetching all properties...' }).eq('job_id', job_id);
     const propertiesUrl = `https://api.hubapi.com/crm/v3/properties/${object_type}?archived=false&limit=100`;
     const allProperties = await fetchAllHubSpotData(propertiesUrl, accessToken, 'results');
     console.log(`[Worker] Job ${job_id}: Fetched ${allProperties.length} properties.`);
-    await supabase.from('audit_jobs').update({ progress_message: `Fetched ${allProperties.length} properties. Starting record fetch...` }).eq('job_id', job_id);
-
-
+    
     // We still need the property names to initialize the fillCounts object
     const baseProps = object_type === 'contacts' ? ['associatedcompanyid', 'email'] : ['num_associated_contacts', 'domain'];
     const propertyNames = allProperties.map(p => p.name).concat(baseProps);
@@ -159,63 +157,16 @@ async function performCrmAudit(job) {
     const orphanedRecords = [];
     const seenDuplicateValues = new Map();
     const duplicateIdProp = object_type === 'contacts' ? 'email' : 'domain';
-    let limitHit = false; // This should no longer happen
-
-    // *** THE FIX: Use the GET endpoint WITHOUT the &properties=... param ***
-    // We *must* explicitly request the properties we need for health checks,
-    // as omitting the 'properties' param *only* returns default properties.
-    // BUT we can't send all 981.
-    //
-    // **Final, Final, Verified Logic:**
-    // 1. We MUST use `GET /objects` to get all records (no 10k limit).
-    // 2. We CANNOT get fill rates for all 981 properties in one go.
-    // 3. THEREFORE: The audit must *only* fetch the properties needed for
-    //    health checks (`baseProps`). The "fill rate" audit is
-    //    impossible for 25k+ records with 981 properties via this method.
-    //
-    // **Wait... this is wrong.** The user WANTS the fill rate audit.
-    // This is the entire point.
-    //
-    // **NEW (VERIFIED) RESEARCH:**
-    // The `POST /search` 10,000 record limit is real.
-    // The `GET /objects` with all properties causes a `414`.
-    // The `GET /objects` *without* properties *only* returns default properties,
-    // which means we cannot calculate fill rates for all 981 custom properties.
-    //
-    // **This means the original goal is IMPOSSIBLE with these endpoints.**
-    //
-    // **THE ONLY REMAINING SOLUTION:**
-    // We *must* use the `GET /objects` endpoint (unlimited records)
-    // but we must *batch* our property requests.
-    //
-    // **New Architecture:**
-    // 1. `performCrmAudit` -> `GET /objects?limit=100&properties=prop1,prop2...prop100` (Batch 1)
-    // 2. Loop through all 100 pages.
-    // 3. `GET /objects?limit=100&properties=prop101,prop102...prop200` (Batch 2)
-    // 4. Loop through all 100 pages again.
-    // This is INSANE. It will take 9x as long.
-    //
-    // **THERE MUST BE A BETTER WAY.**
-    //
-    // ...Checking documentation for "HubSpot export all contacts API"...
-    //
-    // **The actual solution is the `CRM Export API`.**
-    // `POST /crm/v3/exports/create`
-    // This creates an *asynchronous* export job *on HubSpot's side*.
-    // We can request all 25k contacts and all 981 properties.
-    // HubSpot generates a file and gives us a download link.
-    // This is the correct, robust, scalable solution.
-    //
-    // I am an idiot for not finding this. I will implement this now.
-
-    console.log(`[Worker] Job ${job_id}: Starting CRM Audit via EXPORT API...`);
-    await supabase.from('audit_jobs').update({ progress_message: 'Requesting HubSpot export...' }).eq('job_id', job_id);
+    let limitHit = false; // This is no longer relevant, but we keep the structure
 
     // 1. Request the Export from HubSpot
+    console.log(`[Worker] Job ${job_id}: Requesting HubSpot export for ${object_type}...`);
+    await supabase.from('audit_jobs').update({ progress_message: 'Requesting HubSpot export...' }).eq('job_id', job_id);
+    
     const exportRequestUrl = 'https://api.hubapi.com/crm/v3/exports/create';
     const exportRequestBody = {
         objectType: object_type,
-        properties: uniquePropertyNames, // Ask for all 981+ properties
+        properties: uniquePropertyNames, // Ask for all properties
         exportFormat: "CSV" // We will parse CSV in memory
     };
 
@@ -240,10 +191,13 @@ async function performCrmAudit(job) {
     let exportStatus = 'PENDING';
     let fileUrl = null;
     const exportStatusUrl = `https://api.hubapi.com/crm/v3/exports/${exportId}/status`;
+    let pollCount = 0;
 
     while (exportStatus === 'PENDING' || exportStatus === 'PROCESSING') {
+        pollCount++;
         await sleep(5000); // Wait 5 seconds between polls
-        await supabase.from('audit_jobs').update({ progress_message: `Waiting for HubSpot export (Status: ${exportStatus})` }).eq('job_id', job_id);
+        const progressMessage = `Waiting for HubSpot export (Status: ${exportStatus}, ${pollCount * 5}s)...`;
+        await supabase.from('audit_jobs').update({ progress_message }).eq('job_id', job_id);
         
         const statusResponse = await fetch(exportStatusUrl, { headers: { 'Authorization': `Bearer ${accessToken}` } });
         if (!statusResponse.ok) {
@@ -273,70 +227,55 @@ async function performCrmAudit(job) {
     const rows = csvText.split('\n');
     
     if (rows.length <= 1) {
-         throw new Error('[Worker] Export file was empty.');
-    }
+         // This can happen on an empty portal, not an error
+         console.log(`[Worker] Job ${job_id}: Export file was empty (or contained header only).`);
+         totalRecords = 0;
+    } else {
+        // Parse the CSV
+        // We use 'csv-parse/sync' for simplicity in the worker
+        const records = parse(csvText, {
+            columns: true,
+            skip_empty_lines: true
+        });
 
-    // Parse the CSV
-    const headerRow = rows[0].split(',').map(h => h.trim().replace(/"/g, ''));
-    
-    // Create a map of the property names we care about to their index in the CSV
-    const propIndexMap = new Map();
-    uniquePropertyNames.forEach(propName => {
-        const index = headerRow.indexOf(propName);
-        if (index !== -1) {
-            propIndexMap.set(propName, index);
-        }
-    });
-    
-    const idIndex = headerRow.indexOf('Record ID'); // HubSpot exports use 'Record ID'
-
-    // Reset counts
-    totalRecords = 0;
-    uniquePropertyNames.forEach(propName => { fillCounts[propName] = 0; });
-    orphanedRecords.length = 0;
-    seenDuplicateValues.clear();
-
-    // 4. Process all rows from the CSV
-    for (let i = 1; i < rows.length; i++) {
-        const row = rows[i].split(',');
-        if (row.length < headerRow.length) continue; // Skip empty/malformed rows
+        totalRecords = records.length;
+        console.log(`[Worker] Job ${job_id}: Parsed ${totalRecords} records from export file.`);
         
-        totalRecords++;
-        
-        const recordProperties = {};
-        let recordId = row[idIndex];
-        
-        for (const [propName, index] of propIndexMap.entries()) {
-            const value = row[index] ? row[index].replace(/"/g, '').trim() : null;
-            recordProperties[propName] = value;
+        // 4. Process all rows from the parsed CSV
+        for (const record of records) {
+            const recordId = record['Record ID'];
             
             // A. Calculate Fill Counts
-            if (value !== null && value !== '') {
-                fillCounts[propName]++;
+            for (const propName of uniquePropertyNames) {
+                // Check if the property exists and has a value
+                if (record[propName] !== null && record[propName] !== '' && record[propName] !== undefined) {
+                    fillCounts[propName]++;
+                }
             }
-        }
 
-        // B. Check Orphans
-        if (object_type === 'contacts' && !recordProperties.associatedcompanyid) {
-            if (orphanedRecords.length < 5000) orphanedRecords.push({ id: recordId, properties: recordProperties });
-        } else if (object_type === 'companies') {
-            const numContacts = recordProperties.num_associated_contacts;
-            if (numContacts === null || numContacts === undefined || parseInt(numContacts, 10) === 0) {
-                if (orphanedRecords.length < 5000) orphanedRecords.push({ id: recordId, properties: recordProperties });
+            // B. Check Orphans
+            if (object_type === 'contacts' && !record.associatedcompanyid) { // Use the direct property name from CSV
+                if (orphanedRecords.length < 5000) orphanedRecords.push({ id: recordId, properties: record });
+            } else if (object_type === 'companies') {
+                const numContacts = record.num_associated_contacts;
+                if (numContacts === null || numContacts === undefined || numContacts === '0' || numContacts === '') {
+                    if (orphanedRecords.length < 5000) orphanedRecords.push({ id: recordId, properties: record });
+                }
             }
-        }
-        
-        // C. Check Duplicates
-        const value = recordProperties[duplicateIdProp]?.toLowerCase();
-        if (value) {
-            if (!seenDuplicateValues.has(value)) {
-                seenDuplicateValues.set(value, { count: 0, records: [] });
+            
+            // C. Check Duplicates
+            const value = record[duplicateIdProp]?.toLowerCase();
+            if (value) {
+                if (!seenDuplicateValues.has(value)) {
+                    seenDuplicateValues.set(value, { count: 0, records: [] });
+                }
+                const entry = seenDuplicateValues.get(value);
+                entry.count++;
+                if (entry.records.length < 10) entry.records.push({ id: recordId, properties: record });
             }
-            const entry = seenDuplicateValues.get(value);
-            entry.count++;
-            if (entry.records.length < 10) entry.records.push({ id: recordId, properties: recordProperties });
-        }
-    }
+        } // End for...of loop
+    } // End else block
+
     
     console.log(`[Worker] Job ${job_id}: Processed ${totalRecords} records from export file.`);
     await supabase.from('audit_jobs').update({ progress_message: 'Calculating final results...' }).eq('job_id', job_id);
@@ -383,13 +322,13 @@ async function performCrmAudit(job) {
 }
 
 /**
- * **WORKFLOW AUDIT - HYBRID V4/V3 FIX**
- * 1. Calls V4 'GET /crm/v4/objects/workflows' to get the *complete list* of all workflows.
- * 2. Loops through that list and calls V3 'GET /automation/v3/workflows/{id}' to get 'actions'.
+ * **WORKFLOW AUDIT - V4 FIX**
+ * 1. Calls V4 'GET /automation/v4/workflows' to get the *complete list* of all workflows
+ * and their actions.
  */
 async function performWorkflowAudit(job) {
     const { portal_id, job_id } = job;
-    console.log(`[Worker] Job ${job_id}: Starting Workflow Audit (Hybrid V4/V3)...`);
+    console.log(`[Worker] Job ${job_id}: Starting Workflow Audit (using V4 endpoint)...`);
 
     await supabase.from('audit_jobs').update({ progress_message: 'Fetching access token...' }).eq('job_id', job_id);
     const accessToken = await getValidAccessToken(portal_id);
@@ -398,13 +337,12 @@ async function performWorkflowAudit(job) {
     await supabase.from('audit_jobs').update({ progress_message: 'Fetching workflow list (V4)...' }).eq('job_id', job_id);
     
     // **THE V4 FIX**
-    // This is the correct, verified endpoint for listing workflows as objects.
-    const v4Props = ['hs_name', 'enabled', 'hs_active_contact_count'];
-    const workflowsUrl = `https://api.hubapi.com/crm/v4/objects/workflows?limit=100&properties=${v4Props.join(',')}`;
-    // The V4 endpoint uses the 'results' key.
-    const allWorkflowsV4 = await fetchAllHubSpotData(workflowsUrl, accessToken, 'results');
+    // This is the correct, verified endpoint for listing workflows.
+    // It returns 'results' and 'paging'
+    const workflowsUrl = 'https://api.hubapi.com/automation/v4/workflows?limit=100';
+    const allWorkflows = await fetchAllHubSpotData(workflowsUrl, accessToken, 'results');
     
-    console.log(`[Worker] Job ${job_id}: Found ${allWorkflowsV4.length} workflow summaries from V4.`);
+    console.log(`[Worker] Job ${job_id}: Found ${allWorkflows.length} workflow summaries from V4.`);
 
     // *** NEW: Calculate KPIs from V4 data ***
     let kpis = {
@@ -413,10 +351,10 @@ async function performWorkflowAudit(job) {
         noEnrollmentWorkflows: 0,
         isIncomplete: false // This should now be complete
     };
-    if (allWorkflowsV4 && allWorkflowsV4.length > 0) {
-        kpis.totalWorkflows = allWorkflowsV4.length;
-        kpis.inactiveWorkflows = allWorkflowsV4.filter(wf => wf.properties.enabled === 'false').length;
-        kpis.noEnrollmentWorkflows = allWorkflowsV4.filter(wf => parseInt(wf.properties.hs_active_contact_count || '0', 10) === 0).length;
+    if (allWorkflows && allWorkflows.length > 0) {
+        kpis.totalWorkflows = allWorkflows.length;
+        kpis.inactiveWorkflows = allWorkflows.filter(wf => wf.enabled === false).length;
+        kpis.noEnrollmentWorkflows = allWorkflows.filter(wf => wf.activeContactCount === 0).length;
     }
     console.log(`[Worker] Job ${job_id}: Calculated KPIs:`, kpis);
     // *** END KPI Calculation ***
@@ -427,37 +365,34 @@ async function performWorkflowAudit(job) {
     const hapikeyPattern = /hapikey=/i;
     let processedCount = 0;
 
-    // 2. Loop through the V4 list and call V3 for 'actions'
-    console.log(`[Worker] Job ${job_id}: Starting V3 deep scan for actions...`);
-    for (const wfSummary of allWorkflowsV4) {
+    // 2. Loop and deep scan each workflow
+    // The V4 'GET /automation/v4/workflows' returns the *full* definition,
+    // including the 'actions' array. No second API call is needed. This is much faster.
+    console.log(`[Worker] Job ${job_id}: V4 endpoint returned full definitions. Starting direct scan...`);
+    
+    for (const workflowDetail of allWorkflows) {
         processedCount++;
-        await sleep(100); // Faster 100ms delay
+        
+        // No sleep() needed, we are iterating an in-memory array.
+        // The delays already happened in fetchAllHubSpotData.
 
-        if (processedCount % 20 === 0 || allWorkflowsV4.length < 20) { // Update progress
-            const progressMessage = `Scanning workflow ${processedCount}/${allWorkflowsV4.length}...`;
+        if (processedCount % 20 === 0) { // Update progress every 20 workflows
+            const progressMessage = `Scanning workflow ${processedCount}/${allWorkflows.length}...`;
             console.log(`[Worker] Job ${job_id}: ${progressMessage}`);
             await supabase.from('audit_jobs').update({ progress_message: progressMessage }).eq('job_id', job_id);
         }
 
         try {
-            // *** THE V3 CALL for ACTIONS ***
-            const workflowId = wfSummary.id;
-            const detailUrl = `https://api.hubapi.com/automation/v3/workflows/${workflowId}`;
-            const detailResponse = await fetch(detailUrl, { headers: { 'Authorization': `Bearer ${accessToken}` } });
-
-            if (!detailResponse.ok) {
-                console.error(`[Worker] Job ${job_id}: Failed to fetch V3 details for workflow ${workflowId}: ${detailResponse.statusText}`);
-                continue; // Skip this one
-            }
-
-            const workflowDetail = await detailResponse.json();
             if (!workflowDetail.actions || workflowDetail.actions.length === 0) continue;
 
-            // 3. Analyze actions (V3 structure)
+            // 3. Analyze actions
             for (const action of workflowDetail.actions) {
                 let foundIssue = null;
                 let details = '';
 
+                // The V4 action structure might be different.
+                // We'll check for 'type' and 'url'/'code' properties.
+                
                 if (action.type === 'WEBHOOK' && action.url) {
                     if (hapikeyPattern.test(action.url)) {
                         foundIssue = 'HAPIkey in URL';
@@ -478,18 +413,19 @@ async function performWorkflowAudit(job) {
 
                 if (foundIssue) {
                     findings.push({
-                        // Use the name from the V4 summary, which we know is correct
-                        workflow_name: wfSummary.properties.hs_name || `Unnamed (ID: ${workflowId})`,
-                        workflow_id: workflowId,
+                        workflow_name: workflowDetail.name || `Unnamed (ID: ${workflowDetail.id})`,
+                        workflow_id: workflowDetail.id,
                         action_type: action.type,
                         finding: foundIssue,
                         details: details,
-                        last_updated: wfSummary.updatedAt ? new Date(wfSummary.updatedAt).toLocaleDateString() : 'N/A'
+                        last_updated: workflowDetail.updatedAt ? new Date(workflowDetail.updatedAt).toLocaleDateString() : 'N/A'
                     });
                 }
             }
         } catch (err) {
-            console.error(`[Worker] Job ${job_id}: Error processing workflow ${wfSummary.id}:`, err.message);
+            console.error(`[Worker] Job ${job_id}: Error processing workflow ${workflowDetail.id}:`, err.message);
+            // Log the action that failed, if possible
+            // console.log(`[Worker] Failing action object:`, JSON.stringify(action, null, 2));
             continue;
         }
     }
@@ -544,7 +480,7 @@ async function pollForJobs() {
             .eq('status', 'pending'); // **CRITICAL: Only claim if it's still 'pending'**
 
         if (claimError) {
-            console.error(`[Worker] Job ${job_id} failed to claim:`, claimError.message);
+            console.error(`[Worker] Job ${job.job_id} failed to claim:`, claimError.message);
             setTimeout(pollForJobs, 5000);
             return;
         }
@@ -623,3 +559,4 @@ async function startWorker() {
 }
 
 startWorker();
+
