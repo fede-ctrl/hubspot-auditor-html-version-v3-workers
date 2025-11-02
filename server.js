@@ -1,3 +1,6 @@
+// This script runs on the 'auditpulsepro-web' service.
+// It handles web requests, creates jobs, and reports status.
+
 require('dotenv').config();
 const express = require('express');
 const fetch = require('node-fetch');
@@ -7,7 +10,8 @@ const path = require('path');
 const ExcelJS = require('exceljs');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+// Render sets the PORT environment variable.
+const PORT = process.env.PORT || 10000; 
 
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
@@ -16,14 +20,17 @@ app.use(express.static(path.join(__dirname, 'public')));
 // --- Environment Variables ---
 const CLIENT_ID = process.env.HUBSPOT_CLIENT_ID;
 const CLIENT_SECRET = process.env.HUBSPOT_CLIENT_SECRET;
-const RENDER_EXTERNAL_URL = 'https://auditpulse.onrender.com';
+// This variable MUST be set in your Render Web Service environment settings
+// e.g., RENDER_EXTERNAL_URL = https://auditpulsepro-web.onrender.com
+const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL; 
 const REDIRECT_URI = `${RENDER_EXTERNAL_URL}/api/oauth-callback`;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
-// --- HubSpot API Helper ---
+// --- Helper: Get Access Token ---
+// This is still needed for OAuth callbacks and scope checks
 async function getValidAccessToken(portalId) {
     const { data: installation, error } = await supabase.from('installations').select('refresh_token, access_token, expires_at').eq('hubspot_portal_id', portalId).single();
     if (error || !installation) throw new Error(`Could not find installation for portal ${portalId}. Please reinstall the app.`);
@@ -31,103 +38,26 @@ async function getValidAccessToken(portalId) {
     if (new Date() > new Date(expires_at)) {
         console.log(`Refreshing token for portal ${portalId}`);
         const response = await fetch('https://api.hubapi.com/oauth/v1/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'refresh_token', client_id: CLIENT_ID, client_secret: CLIENT_SECRET, refresh_token }), });
-        if (!response.ok) throw new Error(`Failed to refresh access token: ${await response.text()}`);
+        if (!response.ok) throw new Error('Failed to refresh access token');
         const newTokens = await response.json();
         access_token = newTokens.access_token;
         const newExpiresAt = new Date(Date.now() + newTokens.expires_in * 1000).toISOString();
-        const { error: updateError } = await supabase.from('installations').update({ access_token, expires_at: newExpiresAt }).eq('hubspot_portal_id', portalId);
-        if (updateError) console.error("Error updating token in Supabase:", updateError);
+        await supabase.from('installations').update({ access_token, expires_at: newExpiresAt }).eq('hubspot_portal_id', portalId);
     }
     return access_token;
 }
 
-// **REFINED HELPER FUNCTION** - More robust paging logic and logging
-async function fetchAllHubSpotData(initialUrl, accessToken, resultsKey) {
-    const allResults = [];
-    let currentUrl = initialUrl;
-    let pageCount = 0;
-    const MAX_PAGES = 100; // Safety limit
-
-    // Extract limit from initial URL for comparison later
-    const initialUrlParams = new URLSearchParams(initialUrl.split('?')[1] || '');
-    const requestedLimit = parseInt(initialUrlParams.get('limit') || '100', 10); // Default to 100 if not specified
-
-    console.log(`[fetchAllHubSpotData] Starting fetch for key '${resultsKey}' from ${initialUrl} (Requested Limit: ${requestedLimit})`);
-
-    try {
-        while (currentUrl && pageCount < MAX_PAGES) {
-            pageCount++;
-            console.log(`[fetchAllHubSpotData] Fetching page ${pageCount}: ${currentUrl}`);
-            const response = await fetch(currentUrl, { headers: { 'Authorization': `Bearer ${accessToken}` } });
-
-            if (!response.ok) {
-                 const errorBody = await response.text();
-                 console.error(`[fetchAllHubSpotData] HubSpot API request failed: ${response.status} ${response.statusText} for URL: ${currentUrl}. Body: ${errorBody}`);
-                 throw new Error(`HubSpot API request failed: ${response.status} ${response.statusText}`);
-            }
-
-            const data = await response.json();
-
-            // Use the dynamic 'resultsKey'
-            const resultsOnPage = data[resultsKey];
-            let itemsAddedThisPage = 0;
-            if (resultsOnPage && Array.isArray(resultsOnPage)) {
-                allResults.push(...resultsOnPage);
-                itemsAddedThisPage = resultsOnPage.length;
-                console.log(`[fetchAllHubSpotData] Page ${pageCount}: Added ${itemsAddedThisPage} items using key '${resultsKey}'. Total items: ${allResults.length}`);
-            } else {
-                 console.warn(`[fetchAllHubSpotData] Page ${pageCount}: No iterable data found under key '${resultsKey}' or key is missing/not an array. Response keys: ${Object.keys(data)}`);
-            }
-
-            // Paging logic - Check carefully
-            const hasPaging = data.paging && data.paging.next && (data.paging.next.link || data.paging.next.after);
-
-            if (hasPaging) {
-                 console.log(`[fetchAllHubSpotData] Page ${pageCount}: Paging info found.`);
-                if (data.paging.next.link) {
-                    currentUrl = data.paging.next.link;
-                     console.log(`[fetchAllHubSpotData] Paging using 'link': ${currentUrl}`);
-                } else if (data.paging.next.after) {
-                    const baseUrl = initialUrl.split('?')[0];
-                    const searchParams = new URLSearchParams(currentUrl.split('?')[1] || '');
-                    searchParams.set('after', data.paging.next.after);
-                    currentUrl = `${baseUrl}?${searchParams.toString()}`;
-                    console.log(`[fetchAllHubSpotData] Paging using 'after': ${currentUrl}`);
-                }
-                // Check if the API returned fewer items than requested, even with paging info (could indicate end)
-                if (itemsAddedThisPage < requestedLimit && currentUrl) {
-                     console.warn(`[fetchAllHubSpotData] Page ${pageCount}: Received ${itemsAddedThisPage} items (less than requested limit ${requestedLimit}) but paging info exists. Continuing fetch, but this might be the last page.`);
-                }
-            } else {
-                console.log(`[fetchAllHubSpotData] Page ${pageCount}: No valid paging.next.link or paging.next.after found.`);
-                // **Explicitly log if fewer items were received than requested AND no paging**
-                if (itemsAddedThisPage < requestedLimit) {
-                    console.warn(`[fetchAllHubSpotData] Page ${pageCount}: Received ${itemsAddedThisPage} items (less than requested limit ${requestedLimit}) AND no further paging info. Assuming fetch complete.`);
-                } else {
-                    console.log("[fetchAllHubSpotData] Assuming fetch complete as no further paging info provided.");
-                }
-                currentUrl = null; // Stop pagination
-            }
-        } // End while loop
-
-        if (pageCount >= MAX_PAGES) {
-             console.warn(`[fetchAllHubSpotData] Reached maximum page limit (${MAX_PAGES}). Fetch may be incomplete.`);
-        }
-
-        console.log(`[fetchAllHubSpotData] Finished fetch for key '${resultsKey}'. Total items retrieved: ${allResults.length}`);
-        return allResults;
-
-    } catch (error) {
-        console.error(`[fetchAllHubSpotData] Error during fetch for key '${resultsKey}':`, error);
-        throw error;
-    }
-}
-
-
 // --- API Routes ---
+
+// 1. Install & OAuth (Unchanged, but ensure RENDER_EXTERNAL_URL is set in Render)
 app.get('/api/install', (req, res) => {
+    if (!RENDER_EXTERNAL_URL) {
+        console.error("CRITICAL: RENDER_EXTERNAL_URL environment variable is not set.");
+        return res.status(500).send("<h1>Configuration Error</h1><p>The server is missing the RENDER_EXTERNAL_URL environment variable. Cannot proceed with installation.</p>");
+    }
+    console.log("Redirect URI:", REDIRECT_URI);
     const REQUIRED_SCOPES = 'oauth crm.objects.companies.read crm.schemas.contacts.read crm.objects.contacts.read crm.schemas.companies.read';
-    const OPTIONAL_SCOPES = 'automation crm.schemas.deals.read business-intelligence crm.objects.owners.read crm.objects.deals.read';
+    const OPTIONAL_SCOPES = 'automation crm.schemas.deals.read business-intelligence crm.objects.owners.read crm.objects.deals.read crm.objects.tickets.read crm.schemas.tickets.read';
     const authUrl = `https://app.hubspot.com/oauth/authorize?client_id=${CLIENT_ID}&redirect_uri=${REDIRECT_URI}&scope=${REQUIRED_SCOPES}&optional_scope=${OPTIONAL_SCOPES}`;
     res.redirect(authUrl);
 });
@@ -137,51 +67,38 @@ app.post('/api/disconnect', async (req, res) => {
     if (!portalId) return res.status(400).json({ message: 'HubSpot Portal ID is missing.' });
     try {
         const { error } = await supabase.from('installations').delete().eq('hubspot_portal_id', portalId);
-        if (error) {
-            console.error('Supabase disconnect error:', error);
-            throw new Error('Database error during disconnect.');
-        };
+        if (error) throw error;
         res.status(200).json({ message: 'Successfully disconnected.' });
     } catch (error) {
         console.error('Disconnect error:', error);
-        res.status(500).json({ message: error.message || 'Failed to disconnect.' });
+        res.status(500).json({ message: 'Failed to disconnect.' });
     }
 });
-
 
 app.get('/api/oauth-callback', async (req, res) => {
     const authCode = req.query.code;
     if (!authCode) return res.status(400).send('HubSpot authorization code not found.');
+    if (!RENDER_EXTERNAL_URL) {
+         return res.status(500).send("<h1>Configuration Error</h1><p>The server is missing the RENDER_EXTERNAL_URL environment variable. Cannot complete authentication.</p>");
+    }
     try {
         const response = await fetch('https://api.hubapi.com/oauth/v1/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'authorization_code', client_id: CLIENT_ID, client_secret: CLIENT_SECRET, redirect_uri: REDIRECT_URI, code: authCode }), });
-        if (!response.ok) throw new Error(`Token exchange failed: ${await response.text()}`);
+        if (!response.ok) throw new Error(await response.text());
         const tokenData = await response.json();
         const { refresh_token, access_token, expires_in } = tokenData;
 
         const tokenInfoResponse = await fetch(`https://api.hubapi.com/oauth/v1/access-tokens/${access_token}`);
-        if (!tokenInfoResponse.ok) throw new Error(`Failed to fetch HubSpot token info: ${await tokenInfoResponse.text()}`);
+        if (!tokenInfoResponse.ok) throw new Error('Failed to fetch HubSpot token info');
         const tokenInfo = await tokenInfoResponse.json();
 
         const hub_id = tokenInfo.hub_id;
         const granted_scopes = tokenInfo.scopes;
         const expiresAt = new Date(Date.now() + expires_in * 1000).toISOString();
 
-        // Save to Supabase
-        const { error: upsertError } = await supabase.from('installations').upsert(
-            {
-                hubspot_portal_id: hub_id,
-                refresh_token,
-                access_token,
-                expires_at: expiresAt,
-                granted_scopes: granted_scopes
-            },
+        await supabase.from('installations').upsert(
+            { hubspot_portal_id: hub_id, refresh_token, access_token, expires_at: expiresAt, granted_scopes: granted_scopes },
             { onConflict: 'hubspot_portal_id' }
         );
-        if (upsertError) {
-             console.error('Supabase upsert error during oauth:', upsertError);
-             throw new Error('Database error saving installation details.');
-        }
-
         res.redirect(`/?portalId=${hub_id}`);
     } catch (error) {
         console.error('OAuth Callback Error:', error);
@@ -189,37 +106,27 @@ app.get('/api/oauth-callback', async (req, res) => {
     }
 });
 
+// 2. Scope Check (Unchanged)
 app.get('/api/check-scopes', async (req, res) => {
     const portalId = req.header('X-HubSpot-Portal-Id');
     if (!portalId) return res.status(400).json({ message: 'HubSpot Portal ID is missing.' });
     try {
         const { data, error } = await supabase.from('installations').select('granted_scopes').eq('hubspot_portal_id', portalId).single();
-
         if (error) {
             console.error('Supabase error fetching scopes:', error);
             return res.status(500).json({ message: 'Could not fetch permissions.' });
         }
-        if (!data || !data.granted_scopes) {
-            return res.json([]);
-        }
+        if (!data || !data.granted_scopes) return res.json([]);
 
         let scopesArray;
         if (typeof data.granted_scopes === 'string') {
-            try {
-                scopesArray = JSON.parse(data.granted_scopes);
-            } catch (parseError) {
-                console.error('Failed to parse granted_scopes string:', parseError, 'Raw string:', data.granted_scopes);
-                return res.json([]);
-            }
+            try { scopesArray = JSON.parse(data.granted_scopes); } catch (e) { return res.json([]); }
         } else if (Array.isArray(data.granted_scopes)) {
             scopesArray = data.granted_scopes;
         } else {
-            console.warn('granted_scopes has unexpected type:', typeof data.granted_scopes);
             return res.json([]);
         }
-
         res.json(scopesArray);
-
     } catch (error) {
         console.error('Check scopes internal error:', error);
         res.status(500).json({ message: 'Server error checking scopes.' });
@@ -227,258 +134,117 @@ app.get('/api/check-scopes', async (req, res) => {
 });
 
 
-// CRM Audit Endpoint
-app.get('/api/audit', async (req, res) => {
+// 3. *** NEW: Create Audit Job ***
+// This single endpoint replaces BOTH /api/audit and /api/workflow-audit
+app.post('/api/create-audit-job', async (req, res) => {
     const portalId = req.header('X-HubSpot-Portal-Id');
-    const objectType = req.query.objectType || 'contacts';
+    const { objectType } = req.body; // 'contacts', 'companies', 'workflows'
+
     if (!portalId) return res.status(400).json({ message: 'HubSpot Portal ID is missing.' });
-    if (objectType !== 'contacts' && objectType !== 'companies') {
-         return res.status(400).json({ message: 'Invalid objectType. Must be contacts or companies.' });
-    }
+    if (!objectType) return res.status(400).json({ message: 'objectType is missing.' });
 
     try {
-        const accessToken = await getValidAccessToken(portalId);
-
-        const propertiesUrl = `https://api.hubapi.com/crm/v3/properties/${objectType}?archived=false&limit=100`;
-        const allProperties = await fetchAllHubSpotData(propertiesUrl, accessToken, 'results');
-
-        const baseProps = objectType === 'contacts' ? ['associatedcompanyid', 'email'] : ['num_associated_contacts', 'domain'];
-        const propertyNames = allProperties.map(p => p.name).concat(baseProps);
-        const uniquePropertyNames = [...new Set(propertyNames)];
-
-        const propertiesQueryString = uniquePropertyNames.join(',');
-
-        const recordsUrl = `https://api.hubapi.com/crm/v3/objects/${objectType}?limit=100&properties=${propertiesQueryString}`;
-        console.log(`Fetching CRM records: ${recordsUrl}`);
-        const allRecords = await fetchAllHubSpotData(recordsUrl, accessToken, 'results');
-        const totalRecords = allRecords.length;
-        console.log(`Fetched ${totalRecords} ${objectType} records.`);
-
-        // Calculate Fill Rates
-        const fillCounts = {};
-        uniquePropertyNames.forEach(propName => { fillCounts[propName] = 0; });
-
-        allRecords.forEach(r => {
-            if (!r.properties) return;
-            Object.keys(r.properties).forEach(p => {
-                if (r.properties[p] !== null && r.properties[p] !== '' && r.properties[p] !== undefined) {
-                    if (uniquePropertyNames.includes(p)) {
-                         fillCounts[p] = (fillCounts[p] || 0) + 1;
-                    }
-                }
+        // 1. Check for an existing recent job for this object to prevent spam
+        const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+        const { data: existingJob, error: existingError } = await supabase
+            .from('audit_jobs')
+            .select('job_id, status')
+            .eq('portal_id', portalId)
+            .eq('object_type', objectType)
+            .in('status', ['pending', 'running'])
+            .gt('created_at', tenMinutesAgo)
+            .maybeSingle(); // Use maybeSingle to avoid error if no rows found
+        
+        if (existingJob) {
+            console.log(`Job ${existingJob.job_id} is already ${existingJob.status}. Returning existing job.`);
+            return res.status(202).json({ 
+                message: "An audit for this object is already in progress.", 
+                jobId: existingJob.job_id 
             });
-        });
-
-        const auditResults = allProperties.map(prop => {
-            const fillCount = fillCounts[prop.name] || 0;
-            const fillRate = totalRecords > 0 ? Math.round((fillCount / totalRecords) * 100) : 0;
-            return {
-                label: prop.label, internalName: prop.name, type: prop.type, description: prop.description || '', isCustom: !prop.hubspotDefined, fillRate, fillCount
-            };
-        });
-
-        const { orphanedRecords, duplicateRecords } = calculateDataHealth(objectType, allRecords);
-
-        // Calculate Total Duplicates Count
-        const valueMap = new Map();
-        const duplicateIdProp = objectType === 'contacts' ? 'email' : 'domain';
-        duplicateRecords.forEach(rec => {
-            const value = rec?.properties?.[duplicateIdProp]?.toLowerCase();
-            if (value) {
-                if (!valueMap.has(value)) valueMap.set(value, 0);
-                valueMap.set(value, valueMap.get(value) + 1);
-            }
-        });
-        let totalDuplicates = 0;
-        for (const count of valueMap.values()) {
-            if (count > 1) {
-                totalDuplicates += (count - 1);
-            }
+        }
+        if (existingError) {
+            throw existingError;
         }
 
-        const customProperties = auditResults.filter(p => p.isCustom);
-        const averageCustomFillRate = customProperties.length > 0
-            ? Math.round(customProperties.reduce((acc, p) => acc + p.fillRate, 0) / customProperties.length)
-            : 0;
+        // 2. Create a new job
+        const { data: newJob, error: createError } = await supabase
+            .from('audit_jobs')
+            .insert({
+                portal_id: portalId,
+                object_type: objectType,
+                status: 'pending',
+                progress_message: 'Job submitted to queue...'
+            })
+            .select('job_id') // Return the new job ID
+            .single();
 
-        res.json({
-            auditType: 'crm',
-            objectType: objectType,
-            data: {
-                totalRecords, totalProperties: auditResults.length, averageCustomFillRate, properties: auditResults, orphanedRecords, duplicateRecords, totalDuplicates
-            }
+        if (createError) throw createError;
+        
+        console.log(`Created new job ${newJob.job_id} for portal ${portalId}, type ${objectType}`);
+        
+        // 3. Respond immediately with the job ID
+        res.status(202).json({ 
+            message: "Audit job created successfully.",
+            jobId: newJob.job_id 
         });
+
     } catch (error) {
-        console.error(`Audit error for ${objectType}:`, error);
-        res.status(500).json({ message: `Audit failed: ${error.message}. Check server logs for details.` });
+        console.error('Error creating audit job:', error.message);
+        res.status(500).json({ message: `Error creating audit job: ${error.message}` });
     }
 });
 
 
-// Workflow Audit Endpoint
-app.get('/api/workflow-audit', async (req, res) => {
-    const portalId = req.header('X-HubSpot-Portal-Id');
-    if (!portalId) return res.status(400).json({ message: 'HubSpot Portal ID is missing.' });
-
-    console.log(`[DEBUG] Starting workflow audit for portal ${portalId}`);
+// 4. *** NEW: Check Audit Job Status ***
+app.get('/api/audit-status/:jobId', async (req, res) => {
+    const { jobId } = req.params;
+    if (!jobId) return res.status(400).json({ message: 'Job ID is missing.' });
 
     try {
-        // Server-side scope check
-        const { data: installation, error: scopeError } = await supabase.from('installations').select('granted_scopes').eq('hubspot_portal_id', portalId).single();
+        const { data: job, error } = await supabase
+            .from('audit_jobs')
+            .select('status, progress_message, results, error_message')
+            .eq('job_id', jobId)
+            .single();
 
-        let scopesArray = [];
-        if (installation && installation.granted_scopes) {
-             if (typeof installation.granted_scopes === 'string') {
-                try { scopesArray = JSON.parse(installation.granted_scopes); } catch (e) { console.error("Error parsing scopes in workflow audit:", e); }
-             } else if (Array.isArray(installation.granted_scopes)) {
-                scopesArray = installation.granted_scopes;
-             }
+        if (error) throw error;
+        
+        if (!job) {
+            return res.status(404).json({ message: 'Job not found.' });
         }
 
-        if (scopeError || !scopesArray.includes('automation')) {
-             console.warn(`[DEBUG] Workflow audit attempt failed for portal ${portalId}: Missing 'automation' scope. Scopes found: ${scopesArray}`);
-            return res.status(403).json({ message: 'Workflow Audit requires the "Automation" scope. Please disconnect and reinstall the app, ensuring you grant this permission.' });
-        }
-
-        const accessToken = await getValidAccessToken(portalId);
-
-        // 1. Fetch ALL workflow summaries using the helper
-        const workflowsUrl = 'https://api.hubapi.com/automation/v3/workflows?limit=100'; // Initial URL with limit
-        console.log("[DEBUG] Fetching ALL workflows summaries using helper:", workflowsUrl);
-        const allWorkflows = await fetchAllHubSpotData(workflowsUrl, accessToken, 'workflows'); // Use 'workflows' key and the helper
-        console.log(`[DEBUG] Fetch helper completed. Found ${allWorkflows.length} total workflow summaries.`);
-
-        // *** NEW LOGGING: Check if the target workflow ID is in the fetched list ***
-        const targetWorkflowId = '2873517280'; // Your specific custom code workflow ID as a string
-        const targetWorkflowSummary = allWorkflows.find(wf => wf.id.toString() === targetWorkflowId); // Find by ID (convert API ID to string)
-
-        if (targetWorkflowSummary) {
-            console.log(`[DEBUG] Target workflow ID ${targetWorkflowId} (Name: ${targetWorkflowSummary.name}) WAS FOUND in the initial list.`);
+        // Only send back the large 'results' payload if the job is complete
+        if (job.status === 'complete') {
+            res.status(200).json({
+                status: job.status,
+                progress_message: job.progress_message,
+                results: job.results // This contains the full audit data
+            });
         } else {
-            console.error(`[ERROR] Target workflow ID ${targetWorkflowId} WAS NOT FOUND in the fetched list of ${allWorkflows.length} summaries. Pagination might be incomplete or the ID is incorrect/inaccessible.`);
-             if (allWorkflows.length < 50) { // Only log if the list isn't huge
-                 console.log("[DEBUG] Fetched workflow IDs:", allWorkflows.map(wf => wf.id));
-             }
+             res.status(200).json({ // Send status update without the large payload
+                status: job.status,
+                progress_message: job.progress_message,
+                error_message: job.error_message,
+                results: null
+            });
         }
-        // *** END NEW LOGGING ***
-
-
-        const findings = [];
-        const v1EmailPattern = /marketing-emails[\/|\\]v1[\/|\\]emails/i;
-        const hapikeyPattern = /hapikey=/i;
-
-        // 2. Loop and deep scan each workflow from the fetched list
-        console.log("[DEBUG] Starting deep scan of workflows...");
-        let processedCount = 0;
-        for (const workflow of allWorkflows) {
-            processedCount++;
-            // Log less frequently, but always log the target ID if encountered
-            if (workflow.id.toString() === targetWorkflowId || processedCount % 50 === 0 || allWorkflows.length < 50) {
-                 console.log(`[DEBUG] Processing workflow ${processedCount}/${allWorkflows.length} (ID: ${workflow.id}, Name: ${workflow.name})`);
-            }
-
-            try {
-                const detailUrl = `https://api.hubapi.com/automation/v3/workflows/${workflow.id}`;
-                const detailResponse = await fetch(detailUrl, { headers: { 'Authorization': `Bearer ${accessToken}` } });
-
-                if (!detailResponse.ok) {
-                    console.error(`[DEBUG] Failed to fetch details for workflow ${workflow.id}: ${detailResponse.status} ${detailResponse.statusText}`);
-                    continue;
-                }
-
-                const workflowDetail = await detailResponse.json();
-
-                if (!workflowDetail.actions || !Array.isArray(workflowDetail.actions) || workflowDetail.actions.length === 0) {
-                    continue;
-                }
-
-                // 3. Analyze target actions
-                for (const action of workflowDetail.actions) {
-                    let foundIssue = null;
-                    let details = '';
-
-                    // Log the action type for the target workflow specifically, or all if few workflows exist
-                     if (workflow.id.toString() === targetWorkflowId || allWorkflows.length < 10) {
-                        console.log(`[DEBUG] Workflow ID: ${workflow.id} - Checking action. Action Type found: '${action.type}'`);
-                     }
-
-
-                    if (action.type === 'WEBHOOK' && action.url) {
-                         // console.log(`[DEBUG] Workflow ID: ${workflow.id} - Is WEBHOOK action. Testing URL.`);
-                        if (hapikeyPattern.test(action.url)) {
-                            foundIssue = 'HAPIkey in URL';
-                            details = action.url;
-                        } else if (v1EmailPattern.test(action.url)) {
-                            foundIssue = 'V1 Marketing Email API URL';
-                            details = action.url;
-                        }
-                    } else if (action.type === 'CUSTOM_CODE' && action.code) {
-                        // console.log(`\n[DEBUG] Workflow ID: ${workflow.id} - Is CUSTOM_CODE action. Testing code.`);
-                        if (action.code && typeof action.code === 'string') {
-                             if (workflow.id.toString() === targetWorkflowId) {
-                                console.log(`------ BEGIN action.code for ${workflow.id} ------`);
-                                console.log(action.code);
-                                console.log(`------ END action.code for ${workflow.id} ------`);
-                             }
-                            const v1Match = v1EmailPattern.test(action.code);
-                            const hapikeyMatch = hapikeyPattern.test(action.code);
-                             if (workflow.id.toString() === targetWorkflowId) {
-                                console.log(`[DEBUG] Testing V1 Pattern Result for ${workflow.id}: ${v1Match}`);
-                                console.log(`[DEBUG] Testing Hapikey Pattern Result for ${workflow.id}: ${hapikeyMatch}`);
-                             }
-
-                            if (hapikeyMatch) {
-                                foundIssue = 'HAPIkey in Custom Code';
-                                details = 'Custom Code Snippet';
-                            } else if (v1Match) {
-                                foundIssue = 'V1 Marketing Email API in Custom Code';
-                                details = 'Custom Code Snippet';
-                            }
-                        } else {
-                            console.log(`[DEBUG] Workflow ${workflow.id}: CUSTOM_CODE action has no 'code' property or it's not a string.`);
-                        }
-                    }
-
-                    if (foundIssue) {
-                        console.log(`[DEBUG] >>> Finding recorded for Workflow ID ${workflowDetail.id}: ${foundIssue}`);
-                        findings.push({
-                            workflow_name: workflowDetail.name || `Unnamed Workflow (ID: ${workflowDetail.id})`,
-                            workflow_id: workflowDetail.id,
-                            action_type: action.type,
-                            finding: foundIssue,
-                            details: details,
-                            last_updated: workflowDetail.updatedAt ? new Date(workflowDetail.updatedAt).toLocaleDateString() : 'N/A'
-                        });
-                    }
-                } // End loop through actions
-            } catch (err) {
-                console.error(`[DEBUG] Error processing workflow ${workflow.id}:`, err);
-                continue;
-            }
-        } // End loop through workflows
-        console.log(`[DEBUG] Workflow deep scan completed. Found ${findings.length} total issues.`);
-
-        res.json({ auditType: 'workflows', results: findings });
 
     } catch (error) {
-        console.error('[DEBUG] Workflow audit endpoint failed:', error);
-        res.status(500).json({ message: `Workflow audit failed: ${error.message}` });
+        console.error('Error fetching job status:', error.message);
+        res.status(500).json({ message: `Error fetching job status: ${error.message}` });
     }
-}); // End of /api/workflow-audit
+});
 
 
-// Flexible Excel Download Endpoint
+// 5. Excel Download (Unchanged logic, but called differently by frontend)
+// The frontend will now call this *after* it has the results.
 app.post('/api/download-excel', async (req, res) => {
-    const { auditData, auditType, objectType } = req.body;
+    const { auditData, auditType, objectType } = req.body; 
 
     if (!auditData || !auditType) {
         return res.status(400).send('Audit data or type is missing.');
     }
-    if (auditType !== 'crm' && auditType !== 'workflows') {
-        return res.status(400).send('Invalid auditType specified.');
-    }
-
-
+    
     try {
         const workbook = new ExcelJS.Workbook();
         workbook.creator = 'AuditPulse';
@@ -502,7 +268,6 @@ app.post('/api/download-excel', async (req, res) => {
                 });
             }
 
-
             // Worksheet 2: Orphaned/Empty Records
             const orphanLabel = objectType === 'contacts' ? 'Orphaned Contacts' : 'Empty Companies';
             const orphanSheet = workbook.addWorksheet(orphanLabel);
@@ -520,7 +285,6 @@ app.post('/api/download-excel', async (req, res) => {
                 }
             }
 
-
             // Worksheet 3: Duplicates
             const duplicateSheet = workbook.addWorksheet('Duplicates');
             if (crmData.duplicateRecords && Array.isArray(crmData.duplicateRecords)) {
@@ -537,7 +301,6 @@ app.post('/api/download-excel', async (req, res) => {
                 }
             }
 
-
             // Worksheet 4: Properties Missing Description
             const missingDescSheet = workbook.addWorksheet('Properties Missing Description');
             missingDescSheet.columns = [ { header: 'Property Label', key: 'label', width: 30 }, { header: 'Internal Name', key: 'internalName', width: 30 }, { header: 'Type', key: 'type', width: 20 } ];
@@ -546,7 +309,6 @@ app.post('/api/download-excel', async (req, res) => {
                     missingDescSheet.addRow({label: p.label, internalName: p.internalName, type: p.type});
                 });
             }
-
 
         } else if (auditType === 'workflows') {
             if (!auditData.results || !Array.isArray(auditData.results)) {
@@ -566,63 +328,16 @@ app.post('/api/download-excel', async (req, res) => {
             });
         }
 
-        // Set Headers and Write File
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
         res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
-
         await workbook.xlsx.write(res);
         res.end();
-
     } catch (error) {
         console.error('Excel generation error:', error);
         res.status(500).send(`Error generating Excel file: ${error.message}`);
     }
 });
 
-
-// Helper function for CRM Data Health
-function calculateDataHealth(objectType, allRecords) {
-    let orphanedRecords = [];
-    try {
-        if (objectType === 'contacts') {
-            orphanedRecords = allRecords.filter(contact => !contact?.properties?.associatedcompanyid);
-        } else { // 'companies'
-            orphanedRecords = allRecords.filter(company => {
-                const numContacts = company?.properties?.num_associated_contacts;
-                return numContacts === null || numContacts === undefined || parseInt(numContacts, 10) === 0;
-            });
-        }
-    } catch (e) {
-        console.error("Error calculating orphaned records:", e);
-    }
-
-
-    const duplicateIdProp = objectType === 'contacts' ? 'email' : 'domain';
-    const valueMap = new Map();
-    const duplicateRecords = [];
-
-    try {
-        allRecords.forEach(record => {
-            const value = record?.properties?.[duplicateIdProp]?.toLowerCase();
-            if (value) {
-                if (!valueMap.has(value)) {
-                    valueMap.set(value, []);
-                }
-                valueMap.get(value).push(record);
-            }
-        });
-
-        for (const recordsWithValue of valueMap.values()) {
-            if (recordsWithValue.length > 1) {
-                duplicateRecords.push(...recordsWithValue);
-            }
-        }
-    } catch (e) {
-        console.error("Error calculating duplicate records:", e);
-    }
-
-    return { orphanedRecords, duplicateRecords };
-}
 
 // Catch-all route MUST be last
 app.get('*', (req, res) => {
@@ -635,6 +350,4 @@ app.use((err, req, res, next) => {
   res.status(500).send('Something broke on the server!');
 });
 
-
-app.listen(PORT, () => console.log(` Server is live on port ${PORT}`));
-
+app.listen(PORT, () => console.log(`Server (${process.env.RENDER_SERVICE_NAME || 'local'}) is live on port ${PORT}`));
