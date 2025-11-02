@@ -1,6 +1,7 @@
 // This script runs on the 'auditpulsepro-worker' service.
 // It polls for jobs and executes the long-running audits.
-// FIX: Simplified the setupDatabaseFunction to remove the failing pre-check.
+// FIX: Corrected setupDatabaseFunction to use 'supabase.rpc('sql', { query: ... })'
+// This fixes the 'supabase.sql is not a function' crash.
 
 require('dotenv').config();
 const { createClient } = require('@supabase/supabase-js');
@@ -394,7 +395,7 @@ async function performWorkflowAudit(job) {
  * Main function to poll for pending jobs.
  */
 async function pollForJobs() {
-    // console.log('[Worker] Polling for pending jobs...'); // Too noisy, remove for production
+    // console.log('[Worker] Polling for pending jobs...'); // Too noisy
     let job = null;
     try {
         // Find and "claim" the oldest 'pending' job atomically
@@ -481,35 +482,38 @@ async function pollForJobs() {
 /**
  * *** THIS IS THE FIX ***
  * Creates the PostgreSQL function needed for atomic job claiming.
- * This version just runs CREATE OR REPLACE, which is safer.
+ * This version just runs CREATE OR REPLACE, which is safer and uses the correct V2 syntax.
  */
 async function setupDatabaseFunction() {
     console.log('[Worker] Ensuring database function find_and_claim_job() exists...');
     
     // This SQL command is idempotent. It will create the function or replace it.
     // This avoids the flaky pre-check that was failing.
-    const { error: createError } = await supabase.sql(`
-        CREATE OR REPLACE FUNCTION find_and_claim_job()
-        RETURNS audit_jobs AS $$
-        DECLARE
-            claimed_job audit_jobs;
-        BEGIN
-            UPDATE audit_jobs
-            SET status = 'running', updated_at = now(), progress_message = 'Job claimed by worker...'
-            WHERE job_id = (
-                SELECT job_id
-                FROM audit_jobs
-                WHERE status = 'pending'
-                ORDER BY created_at
-                LIMIT 1
-                FOR UPDATE SKIP LOCKED
-            )
-            RETURNING * INTO claimed_job;
-            
-            RETURN claimed_job;
-        END;
-        $$ LANGUAGE plpgsql;
-    `);
+    // This uses the *CORRECT* V2 syntax: supabase.rpc('sql', { query: '...' })
+    const { error: createError } = await supabase.rpc('sql', { 
+        query: `
+            CREATE OR REPLACE FUNCTION find_and_claim_job()
+            RETURNS audit_jobs AS $$
+            DECLARE
+                claimed_job audit_jobs;
+            BEGIN
+                UPDATE audit_jobs
+                SET status = 'running', updated_at = now(), progress_message = 'Job claimed by worker...'
+                WHERE job_id = (
+                    SELECT job_id
+                    FROM audit_jobs
+                    WHERE status = 'pending'
+                    ORDER BY created_at
+                    LIMIT 1
+                    FOR UPDATE SKIP LOCKED
+                )
+                RETURNING * INTO claimed_job;
+                
+                RETURN claimed_job;
+            END;
+            $$ LANGUAGE plpgsql;
+        `
+    });
     
     if (createError) {
         console.error('[Worker] CRITICAL: Failed to create/replace database function:', createError.message);
