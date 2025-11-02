@@ -1,7 +1,7 @@
 // This script runs on the 'auditpulsepro-worker' service.
 // It polls for jobs and executes the long-running audits.
-// FIX: Corrected setupDatabaseFunction to use 'supabase.rpc('sql', { query: ... })'
-// This fixes the 'supabase.sql is not a function' crash.
+// FIX: REMOVED the entire 'setupDatabaseFunction' block which was crashing the worker.
+// Replaced with a simpler and more robust SELECT-then-UPDATE polling logic.
 
 require('dotenv').config();
 const { createClient } = require('@supabase/supabase-js');
@@ -392,74 +392,91 @@ async function performWorkflowAudit(job) {
 // ---------------------------------
 
 /**
- * Main function to poll for pending jobs.
+ * *** THIS IS THE FIX ***
+ * Main function to poll for pending jobs using a simple SELECT-then-UPDATE.
+ * This removes the need for the complex SQL function that was crashing the worker.
  */
 async function pollForJobs() {
     // console.log('[Worker] Polling for pending jobs...'); // Too noisy
     let job = null;
     try {
-        // Find and "claim" the oldest 'pending' job atomically
-        // This RPC function is created by setupDatabaseFunction()
-        const { data, error } = await supabase.rpc('find_and_claim_job');
-
-        if (data) {
-            job = data; // The RPC returns the job it claimed
-        } else {
-            // No job found, or error.
-            if (error && error.code !== 'PGRST116') { // PGRST116 = no rows returned, which is normal
-                 console.error('[Worker] Error fetching job:', error.message);
-            }
-            // No job found is normal. Wait and poll again.
+        // 1. Find the oldest 'pending' job
+        const { data: foundJob, error: findError } = await supabase
+            .from('audit_jobs')
+            .select('*')
+            .eq('status', 'pending')
+            .order('created_at', { ascending: true })
+            .limit(1)
+            .maybeSingle(); // Returns one job or null, doesn't error if empty
+        
+        if (findError) {
+            console.error('[Worker] Error fetching job:', findError.message);
+            setTimeout(pollForJobs, 10000); // Wait 10s on error
+            return;
+        }
+        
+        if (!foundJob) {
+            // No job found, which is normal. Wait and poll again.
             setTimeout(pollForJobs, 5000); // Poll again in 5 seconds
             return;
         }
 
+        // 2. We found a job. Claim it by updating its status.
+        job = foundJob; // Assign to outer scope for error handling
+        console.log(`[Worker] Job ${job.job_id} found. Claiming...`);
+        const { error: claimError } = await supabase
+            .from('audit_jobs')
+            .update({ status: 'running', progress_message: 'Job claimed by worker...' })
+            .eq('job_id', job.job_id);
 
-        if (job) {
-            console.log(`[Worker] Job ${job.job_id} claimed for portal ${job.portal_id}. Starting audit...`);
-
-            // --- Job Execution ---
-            let auditResults = {};
-            try {
-                // 2. Run the audit based on type
-                if (job.object_type === 'contacts' || job.object_type === 'companies') {
-                    auditResults = await performCrmAudit(job);
-
-                } else if (job.object_type === 'workflows') {
-                    auditResults = await performWorkflowAudit(job);
-                
-                } else {
-                    throw new Error(`Unknown job object_type: ${job.object_type}`);
-                }
-
-                // 3. Mark job as 'complete'
-                await supabase
-                    .from('audit_jobs')
-                    .update({
-                        status: 'complete',
-                        progress_message: 'Audit complete.',
-                        results: auditResults // Store the final results
-                    })
-                    .eq('job_id', job.job_id);
-                
-                console.log(`[Worker] Job ${job.job_id} completed successfully.`);
-
-            } catch (auditError) {
-                // 4. Mark job as 'failed' if an error occurs
-                console.error(`[Worker] Job ${job_id} FAILED:`, auditError.message, auditError.stack);
-                await supabase
-                    .from('audit_jobs')
-                    .update({ 
-                        status: 'failed', 
-                        error_message: auditError.message.substring(0, 500), // Truncate error
-                        progress_message: 'Audit failed.' 
-                    })
-                    .eq('job_id', job.job_id);
-            }
-            
-            // Immediately poll for the next job
-            setTimeout(pollForJobs, 1000); 
+        if (claimError) {
+            console.error(`[Worker] Job ${job.job_id} failed to claim:`, claimError.message);
+            setTimeout(pollForJobs, 5000); // Try again later
+            return;
         }
+
+        // 3. Now that we've claimed it, execute the job
+        console.log(`[Worker] Job ${job.job_id} claimed for portal ${job.portal_id}. Starting audit...`);
+        let auditResults = {};
+        try {
+            // Run the audit based on type
+            if (job.object_type === 'contacts' || job.object_type === 'companies') {
+                auditResults = await performCrmAudit(job);
+
+            } else if (job.object_type === 'workflows') {
+                auditResults = await performWorkflowAudit(job);
+            
+            } else {
+                throw new Error(`Unknown job object_type: ${job.object_type}`);
+            }
+
+            // 4. Mark job as 'complete'
+            await supabase
+                .from('audit_jobs')
+                .update({
+                    status: 'complete',
+                    progress_message: 'Audit complete.',
+                    results: auditResults // Store the final results
+                })
+                .eq('job_id', job.job_id);
+            
+            console.log(`[Worker] Job ${job.job_id} completed successfully.`);
+
+        } catch (auditError) {
+            // 5. Mark job as 'failed' if an error occurs
+            console.error(`[Worker] Job ${job.job_id} FAILED:`, auditError.message, auditError.stack);
+            await supabase
+                .from('audit_jobs')
+                .update({ 
+                    status: 'failed', 
+                    error_message: auditError.message.substring(0, 500), // Truncate error
+                    progress_message: 'Audit failed.' 
+                })
+                .eq('job_id', job.job_id);
+        }
+        
+        // Immediately poll for the next job
+        setTimeout(pollForJobs, 1000); 
 
     } catch (err) {
         console.error('[Worker] Fatal Error in pollForJobs loop:', err.message);
@@ -480,48 +497,10 @@ async function pollForJobs() {
 }
 
 /**
- * *** THIS IS THE FIX ***
- * Creates the PostgreSQL function needed for atomic job claiming.
- * This version just runs CREATE OR REPLACE, which is safer and uses the correct V2 syntax.
+ * *** THIS FUNCTION IS NOW REMOVED ***
+ * We no longer need to create a special SQL function.
  */
-async function setupDatabaseFunction() {
-    console.log('[Worker] Ensuring database function find_and_claim_job() exists...');
-    
-    // This SQL command is idempotent. It will create the function or replace it.
-    // This avoids the flaky pre-check that was failing.
-    // This uses the *CORRECT* V2 syntax: supabase.rpc('sql', { query: '...' })
-    const { error: createError } = await supabase.rpc('sql', { 
-        query: `
-            CREATE OR REPLACE FUNCTION find_and_claim_job()
-            RETURNS audit_jobs AS $$
-            DECLARE
-                claimed_job audit_jobs;
-            BEGIN
-                UPDATE audit_jobs
-                SET status = 'running', updated_at = now(), progress_message = 'Job claimed by worker...'
-                WHERE job_id = (
-                    SELECT job_id
-                    FROM audit_jobs
-                    WHERE status = 'pending'
-                    ORDER BY created_at
-                    LIMIT 1
-                    FOR UPDATE SKIP LOCKED
-                )
-                RETURNING * INTO claimed_job;
-                
-                RETURN claimed_job;
-            END;
-            $$ LANGUAGE plpgsql;
-        `
-    });
-    
-    if (createError) {
-        console.error('[Worker] CRITICAL: Failed to create/replace database function:', createError.message);
-        throw new Error('Failed to create/replace database function.');
-    }
-    
-    console.log('[Worker] Database function created/updated successfully.');
-}
+// async function setupDatabaseFunction() { ... }
 
 
 /**
@@ -534,13 +513,9 @@ async function startWorker() {
         return;
     }
     
-    try {
-        await setupDatabaseFunction(); // Ensure the DB function exists before polling
-        console.log('[Worker] AuditPulse Worker Service started. Polling for jobs...');
-        pollForJobs(); // Start the polling loop
-    } catch (err) {
-        console.error('[Worker] Failed to start worker:', err.message);
-    }
+    // We no longer need to call setupDatabaseFunction()
+    console.log('[Worker] AuditPulse Worker Service started. Polling for jobs...');
+    pollForJobs(); // Start the polling loop
 }
 
 startWorker();
