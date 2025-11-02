@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" type="image/x-icon" href="/logo3.png">
-    <title>AuditPulse Pro</title> <!-- Renamed for clarity -->
+    <title>AuditPulse Pro</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         .loader { border: 4px solid #f3f3f3; border-top: 4px solid #f97316; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; }
@@ -58,6 +58,11 @@
             <!-- Error Panel -->
             <div id="error" class="my-8 hidden bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-lg" role="alert"><strong class="font-bold">Error: </strong><span id="error-message"></span></div>
             
+            <!-- ** NEW: CRM 10k Limit Warning Panel ** -->
+            <div id="crm-limit-warning" class="my-8 hidden bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded-lg" role="alert">
+                <strong class="font-bold">Audit Incomplete:</strong> This audit was capped at the **first 10,000 records** due to a HubSpot API limitation. The fill rates and health checks are based only on this initial sample.
+            </div>
+
             <!-- ===== CRM Results Container ===== -->
             <div id="crm-results-container" class="hidden">
                 <div id="data-health-summary" class="my-8"><h2 class="text-2xl font-semibold mb-4 text-center">Data Health Overview (<span id="health-object-type"></span>)</h2><div id="data-health-cards" class="grid grid-cols-1 md:grid-cols-2 gap-6"></div></div>
@@ -73,12 +78,24 @@
                 </div>
             </div>
 
-            <!-- ===== NEW: Workflow Results Container ===== -->
+            <!-- ===== Workflow Results Container ===== -->
             <div id="workflow-results-container" class="hidden">
+                <!-- ** NEW: Workflow KPI Summary Cards ** -->
+                <div id="workflow-kpi-summary" class="my-8">
+                    <h2 class="text-2xl font-semibold mb-4 text-center">Workflow Health Overview</h2>
+                    <div id="workflow-kpi-cards" class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                        <!-- Cards will be injected here -->
+                    </div>
+                    <!-- ** NEW: Incomplete Workflow Data Warning ** -->
+                    <div id="workflow-incomplete-warning" class="mt-4 text-center text-sm text-yellow-700 font-semibold hidden">
+                        Warning: Due to a HubSpot API bug, this audit may be incomplete. Only the first page of workflows was returned.
+                    </div>
+                </div>
+
                 <div class="my-8">
                     <div class="flex justify-between items-center mb-4 flex-wrap gap-4">
-                        <h2 class="text-2xl font-semibold">Workflow Audit Findings</h2>
-                        <button id="download-excel-btn-wf" class="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded transition-colors cursor-pointer">Download Workflow Report (Excel)</button>
+                        <h2 class="text-2xl font-semibold">Workflow V1/Hapikey Findings</h2>
+                        <button id="download-excel-btn-wf" class="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded transition-colors cursor-pointer">Download Findings (Excel)</button>
                     </div>
                     <p id="workflow-audit-timestamp" class="text-sm text-gray-500 mb-4"></p>
                     <div id="workflow-table-content" class="overflow-x-auto bg-white rounded-lg shadow">
@@ -92,8 +109,8 @@
                 <div class="mb-4">
                     <a href="#" id="about-btn" class="text-gray-500 hover:underline mx-2">About This App</a>
                     <a href="mailto:info@cassandraadvisory.com" class="text-orange-500 hover:underline mx-2">Contact Support</a>
-                    <a href="https.www.cassandraadvisory.com/privacy-policy" target="_blank" rel="noopener noreferrer" class="hover:underline mx-2">Privacy Policy</a>
-                    <a href="https.www.cassandraadvisory.com/terms-of-service" target="_blank" rel="noopener noreferrer" class="hover:underline mx-2">Terms of Service</a>
+                    <a href="https_www.cassandraadvisory.com/privacy-policy" target="_blank" rel="noopener noreferrer" class="hover:underline mx-2">Privacy Policy</a>
+                    <a href="https_www.cassandraadvisory.com/terms-of-service" target="_blank" rel="noopener noreferrer" class="hover:underline mx-2">Terms of Service</a>
                 </div>
                 <p class="italic">This application is independent of HubSpot, Inc., and is not authorized by, endorsed by, sponsored by, affiliated with, or otherwise approved by HubSpot, Inc.</p>
             </footer>
@@ -131,7 +148,7 @@
             
             // --- State Variables ---
             let currentCrmData = {};
-            let currentWorkflowData = [];
+            let currentWorkflowData = {}; // Will hold { results: [], kpis: {} }
             let currentObjectType = '';
             let currentAuditType = ''; // 'crm' or 'workflows'
             let currentCrmSortDir = 'asc';
@@ -140,6 +157,8 @@
             // **NEW**: Job Polling State
             let currentJobId = null;
             let jobPollInterval = null;
+            let pollFailureCount = 0; // **NEW: For resilient polling**
+            const MAX_POLL_FAILURES = 3; // **NEW: Retry 3 times**
             
             const elements = {
                 welcomeContainer: document.getElementById('welcome-container'),
@@ -150,6 +169,7 @@
                 loadingText: document.getElementById('loading-text'), 
                 error: document.getElementById('error'), 
                 errorMessage: document.getElementById('error-message'), 
+                crmLimitWarning: document.getElementById('crm-limit-warning'), // **NEW**
                 
                 // CRM Elements
                 crmResultsContainer: document.getElementById('crm-results-container'),
@@ -165,6 +185,8 @@
                 // Workflow Elements
                 auditWorkflowsBtn: document.getElementById('audit-workflows-btn'),
                 workflowResultsContainer: document.getElementById('workflow-results-container'),
+                workflowKpiCards: document.getElementById('workflow-kpi-cards'), // **NEW**
+                workflowIncompleteWarning: document.getElementById('workflow-incomplete-warning'), // **NEW**
                 workflowTableContent: document.getElementById('workflow-table-content'),
                 workflowAuditTimestamp: document.getElementById('workflow-audit-timestamp'),
                 downloadExcelBtnWf: document.getElementById('download-excel-btn-wf'),
@@ -189,7 +211,9 @@
                 <p>AuditPulse is designed to provide HubSpot administrators with a quick and actionable overview of their portal's data health and property utilization.</p>
                 <div>
                     <h4 class="font-semibold">How It Works (Async)</h4>
-                    <p class="text-sm">When you start an audit, a job is submitted to a background worker. This allows the app to process large amounts of data (like 25,000+ contacts) without timing out. The app will poll for updates and display the results here when complete.</p>
+                    <p class="text-sm">When you start an audit, a job is submitted to a background worker. This allows the app to process large amounts of data without timing out. The app will poll for updates and display the results here when complete.</p>
+                    <p class="text-sm font-bold mt-2">CRM Audit Limit:</p>
+                    <p class="text-sm">Due to a HubSpot API limitation, the Contact and Company audits are currently capped at the first **10,000 records** found when sorting by internal ID.</p>
                 </div>
                 <p>For support, please contact <a href="mailto:info@cassandraadvisory.com" class="text-blue-600 hover:underline">info@cassandraadvisory.com</a>.</p>`;
             
@@ -220,14 +244,12 @@
                     if (Array.isArray(scopes) && scopes.includes('automation')) {
                         hasAutomationScope = true;
                     }
-                    // We could add checks for 'crm.objects.deals.read' etc. here too
                 } catch (err) {
                     console.error('Scope check failed:', err.message);
                 }
             };
 
             const disconnect = async () => {
-                // Using a simple confirm for now
                 if (!window.confirm('Are you sure you want to disconnect?')) return;
                 
                 try {
@@ -277,6 +299,7 @@
                 elements.error.classList.add('hidden'); 
                 elements.crmResultsContainer.classList.add('hidden'); 
                 elements.workflowResultsContainer.classList.add('hidden');
+                elements.crmLimitWarning.classList.add('hidden'); // **NEW**
             };
             
             const createStatCard = (l, v, type, tooltipText) => {
@@ -299,6 +322,7 @@
                     jobPollInterval = null;
                 }
                 currentJobId = null;
+                pollFailureCount = 0; // Reset failure count
                 setButtonsDisabled(false); // Re-enable buttons
             };
 
@@ -306,7 +330,6 @@
              * Starts a new audit job on the backend.
              */
             const startAuditJob = async (objectType) => {
-                // Special check for 'workflows' scope
                 if (objectType === 'workflows' && !hasAutomationScope) {
                     showError('Workflow Audit requires the "Automation" scope. You did not grant this permission during installation. Please disconnect and reinstall the app, ensuring you grant this permission.');
                     return;
@@ -336,7 +359,7 @@
                     
                     currentJobId = data.jobId;
                     console.log("Job created with ID:", currentJobId);
-                    // Start polling for status
+                    pollFailureCount = 0; // Reset failure count for new job
                     pollForStatus(currentJobId, objectType);
 
                 } catch (err) {
@@ -346,6 +369,7 @@
             };
             
             /**
+             * **NEW: Resilient Polling**
              * Polls the backend for the status of a specific job ID.
              */
             const pollForStatus = (jobId, objectType) => {
@@ -363,35 +387,39 @@
                         });
                         
                         if (!response.ok) {
-                            // If status check fails (e.g., 404, 500), stop polling
-                            throw new Error('Audit status check failed. Stopping.');
+                             // **NEW: Handle network errors gracefully**
+                            pollFailureCount++;
+                            console.warn(`Poll attempt ${pollFailureCount}/${MAX_POLL_FAILURES} failed: ${response.status}`);
+                            if (pollFailureCount >= MAX_POLL_FAILURES) {
+                                throw new Error(`Audit status check failed ${MAX_POLL_FAILURES} times. Stopping.`);
+                            }
+                            // Don't stop, just wait for the next interval
+                            return;
                         }
-
+                        
+                        pollFailureCount = 0; // Reset failure count on success
                         const data = await response.json();
                         
                         switch (data.status) {
                             case 'pending':
                             case 'running':
-                                // Update loading message with progress
                                 showLoading(data.progress_message || 'Audit is running...');
                                 break;
                             case 'failed':
-                                // Job failed
                                 showError(data.error_message || 'The audit job failed.');
                                 stopPolling();
                                 break;
                             case 'complete':
-                                // Job Success!
                                 hideLoading();
                                 stopPolling();
                                 console.log("Job complete. Results:", data.results);
-                                // Pass results to the correct display function
+                                
                                 if (data.results.auditType === 'crm') {
                                     currentObjectType = data.results.objectType;
-                                    currentCrmData = data.results.data; // The payload is in data.results.data
+                                    currentCrmData = data.results.data;
                                     displayCrmResults(currentCrmData);
                                 } else if (data.results.auditType === 'workflows') {
-                                    currentWorkflowData = data.results.results; // The payload is in data.results.results
+                                    currentWorkflowData = data.results; // Full object { auditType, results, kpis }
                                     displayWorkflowResults(currentWorkflowData);
                                 }
                                 break;
@@ -400,6 +428,7 @@
                         }
 
                     } catch (err) {
+                        // Catch fetch errors or other critical failures
                         showError(err.message);
                         stopPolling();
                     }
@@ -407,11 +436,20 @@
             };
 
             // -------------------------------------
-            // --- Result Display Functions (Mostly Unchanged) ---
+            // --- Result Display Functions ---
             // -------------------------------------
             
+            /**
+             * **NEW: Handles CRM Limit Warning**
+             */
             const displayCrmResults = (data) => {
                 hideAllSections();
+                
+                // **NEW: Show 10k limit warning if limitHit=true**
+                if (data.limitHit) {
+                    elements.crmLimitWarning.classList.remove('hidden');
+                }
+                
                 const objectType = currentObjectType;
                 const orphanLabel = objectType === 'contacts' ? 'Orphaned Contacts' : 'Empty Companies';
                 const duplicateLabel = `Duplicate ${objectType.charAt(0).toUpperCase() + objectType.slice(1)}`;
@@ -422,7 +460,7 @@
                 
                 const missingDescCount = data.properties.filter(p => !p.description).length;
                 elements.summaryObjectType.textContent = objectType;
-                elements.summaryCards.innerHTML = `${createStatCard(`Total ${objectType}`, data.totalRecords.toLocaleString())}${createStatCard('Total Properties', data.totalProperties.toLocaleString())}${createStatCard('Properties Missing Description', missingDescCount.toLocaleString(), 'missingDescription')}${createStatCard('Avg. Custom Prop. Fill Rate', `${data.averageCustomFillRate}%`)}`;
+                elements.summaryCards.innerHTML = `${createStatCard(`Total ${objectType} (Sampled)`, data.totalRecords.toLocaleString(), null, "Audit capped at 10,000 records.")}${createStatCard('Total Properties', data.totalProperties.toLocaleString())}${createStatCard('Properties Missing Description', missingDescCount.toLocaleString(), 'missingDescription')}${createStatCard('Avg. Custom Prop. Fill Rate', `${data.averageCustomFillRate}%`)}`;
                 elements.auditTimestamp.textContent = `Audit completed at: ${new Date().toLocaleString()}`;
                 
                 if (data.properties.length === 0) {
@@ -430,7 +468,6 @@
                 } else {
                     elements.crmTableContent.innerHTML = `<table class="w-full divide-y divide-gray-200"><thead class="bg-gray-50"><tr><th class="w-[35%] px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Property Label</th><th class="w-[15%] px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Source</th><th class="w-[20%] px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Filled Records</th><th id="fill-rate-header" class="w-[30%] px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider sortable sort-asc">Fill Rate</th></tr></thead><tbody id="properties-tbody" class="bg-white"></tbody></table>`;
                     
-                    // Need to re-add listener *after* table is created
                     document.getElementById('fill-rate-header').addEventListener('click', () => { 
                         currentCrmSortDir = currentCrmSortDir === 'asc' ? 'desc' : 'asc'; 
                         sortAndRenderCrmTable(); 
@@ -446,7 +483,6 @@
                 currentCrmData.properties.forEach((p, index) => {
                     tableHtml += `<tr class="border-t border-gray-200"><td class="px-4 py-4 text-sm font-medium text-gray-900 break-words"><button class="details-toggle-btn text-blue-600 hover:text-blue-800 mr-2 font-bold text-lg" data-target-id="details-${index}">+</button>${p.label}</td><td class="px-4 py-4 text-sm font-semibold ${p.isCustom ? 'text-blue-600' : 'text-gray-600'}">${p.isCustom ? 'Custom' : 'Standard'}</td><td class="px-4 py-4 text-sm text-gray-500 text-right">${p.fillCount.toLocaleString()}</td><td class="px-4 py-4 text-sm text-gray-500"><div class="flex items-center"><div class="w-full bg-gray-200 rounded-full h-2.5"><div class="h-2.5 rounded-full ${p.fillRate < 25 ? 'bg-red-500' : 'bg-green-500'}" style="width: ${p.fillRate}%"></div></div><span class="ml-3 font-semibold w-10 text-right">${p.fillRate}%</span></div></td></tr><tr id="details-${index}" class="hidden details-row"><td colspan="4" class="p-4"><dl class="grid grid-cols-1 sm:grid-cols-3 gap-x-4 gap-y-2 text-sm"><dt class="font-semibold text-gray-600">Internal Name:</dt><dd class="sm:col-span-2 font-mono text-gray-800 break-all">${p.internalName}</dd><dt class="font-semibold text-gray-600">Type:</dt><dd class="sm:col-span-2 text-gray-800">${p.type}</dd><dt class="font-semibold text-gray-600">Description:</dt><dd class="sm:col-span-2 text-gray-800 italic">${p.description ? p.description : 'No description provided.'}</dd></dl></td></tr>`;
                 });
-                // Ensure properties-tbody exists before setting innerHTML
                 const tbody = document.getElementById('properties-tbody');
                 if (tbody) {
                     tbody.innerHTML = tableHtml;
@@ -456,17 +492,37 @@
             const sortAndRenderCrmTable = () => { 
                 currentCrmData.properties.sort((a,b) => currentCrmSortDir === 'asc' ? a.fillRate - b.fillRate : b.fillRate - a.fillRate); 
                 const header = document.getElementById('fill-rate-header');
-                if (header) { // Add check in case table wasn't rendered
+                if (header) {
                     header.classList.toggle('sort-asc', currentCrmSortDir === 'asc'); 
                     header.classList.toggle('sort-desc', currentCrmSortDir === 'desc'); 
                 }
                 renderCrmTable(); 
             };
             
-            const displayWorkflowResults = (results) => {
+            /**
+             * **NEW: Renders Workflow KPIs and Findings**
+             */
+            const displayWorkflowResults = (data) => {
                 hideAllSections();
-                elements.workflowAuditTimestamp.textContent = `Audit completed at: ${new Date().toLocaleString()}`;
+                const kpis = data.kpis;
+                const results = data.results;
+                
+                // **NEW: Render KPI Cards**
+                elements.workflowKpiCards.innerHTML = `
+                    ${createStatCard('Total Workflows', kpis.totalWorkflows.toLocaleString(), null, "Total workflows found in the portal.")}
+                    ${createStatCard('Inactive Workflows', kpis.inactiveWorkflows.toLocaleString(), null, "Workflows that are currently turned off.")}
+                    ${createStatCard('Workflows w/ No Enrollments', kpis.noEnrollmentWorkflows.toLocaleString(), null, "Workflows that have 0 contacts currently enrolled.")}
+                `;
+                
+                // **NEW: Show Incomplete Warning if flag is set**
+                if (kpis.isIncomplete) {
+                     elements.workflowIncompleteWarning.classList.remove('hidden');
+                } else {
+                     elements.workflowIncompleteWarning.classList.add('hidden');
+                }
 
+                // Render findings table
+                elements.workflowAuditTimestamp.textContent = `Audit completed at: ${new Date().toLocaleString()}`;
                 if (!results || results.length === 0) {
                     elements.workflowTableContent.innerHTML = `<p class="text-center p-10 text-gray-500">No workflows found with insecure HAPIkeys or V1 API calls.</p>`;
                 } else {
@@ -503,7 +559,6 @@
                     showError("No CRM audit data to download. Please run an audit first.");
                     return;
                 }
-                // Send the *current* data, which was set when the job completed
                 const body = { 
                     auditData: { data: currentCrmData },
                     auditType: 'crm', 
@@ -513,12 +568,12 @@
             }
 
             async function downloadExcelReportWf() {
-                if (!currentWorkflowData || currentWorkflowData.length === 0) {
+                if (!currentWorkflowData || !currentWorkflowData.results) { // Check for results property
                      showError("No Workflow audit data to download. Please run an audit first.");
                     return;
                 }
                 const body = { 
-                    auditData: { results: currentWorkflowData },
+                    auditData: { results: currentWorkflowData.results }, // Only send the 'results' array
                     auditType: 'workflows'
                 };
                 await downloadExcel(body, `AuditPulse-Report-Workflows`);
@@ -586,7 +641,7 @@
                         rows = data.map(r => [ `${r.properties.firstname || ''} ${r.properties.lastname || ''}`, r.properties.email || 'N/A', new Date(r.properties.createdate).toLocaleDateString(), `<a href="https://app.hubspot.com/contacts/${portalId}/contact/${r.id}" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">View Record</a>` ]);
                     } else {
                         headers = ['Company Name', 'Domain', 'Create Date', 'Link'];
-                        rows = data.map(r => [ r.properties.name || 'N/A', r.properties.domain || 'N/A', new Date(r.properties.createdate).toLocaleDateString(), `<a href="https://app.hubspot.com/contacts/${portalId}/company/${r.id}" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">View Record</a>` ]);
+                        rows = data..map(r => [ r.properties.name || 'N/A', r.properties.domain || 'N/A', new Date(r.properties.createdate).toLocaleDateString(), `<a href="https://app.hubspot.com/contacts/${portalId}/company/${r.id}" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">View Record</a>` ]);
                     }
                 }
                 
