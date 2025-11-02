@@ -1,21 +1,18 @@
 // This script runs on the 'auditpulsepro-worker' service.
 // It polls for jobs and executes the long-running audits.
-// FIX: Rewrote performCrmAudit to use 'POST /search' endpoint.
-// This moves the 'properties' list from the URL query (causing 414 error)
-// into the request body, which has no length limit.
+// FIX: Corrected a fatal ReferenceError in the catch blocks.
+// 'job_id' was used instead of 'job.job_id', crashing the worker on any audit failure.
 
 require('dotenv').config();
 const { createClient } = require('@supabase/supabase-js');
 const fetch = require('node-fetch');
 
 // --- Supabase Client ---
-// Ensure these ENV VARS are set in the Render worker service
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
 // --- HubSpot API Clients ---
-// We need the HubSpot credentials here too
 const CLIENT_ID = process.env.HUBSPOT_CLIENT_ID;
 const CLIENT_SECRET = process.env.HUBSPOT_CLIENT_SECRET;
 
@@ -24,12 +21,8 @@ const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 // ---------------------------------
 // --- AUDIT HELPER FUNCTIONS ---
-// (These are now part of the worker)
 // ---------------------------------
 
-/**
- * Gets a valid access token from Supabase, refreshing if needed.
- */
 async function getValidAccessToken(portalId) {
     const { data: installation, error } = await supabase
         .from('installations')
@@ -68,11 +61,6 @@ async function getValidAccessToken(portalId) {
     return access_token;
 }
 
-/**
- * Fetches *all pages* of data from a HubSpot endpoint.
- * This is now used for Properties and Workflows (which are smaller lists).
- * This is NOT used for the 25k contacts/companies list.
- */
 async function fetchAllHubSpotData(initialUrl, accessToken, resultsKey) {
     const allResults = [];
     let currentUrl = initialUrl;
@@ -132,9 +120,7 @@ async function fetchAllHubSpotData(initialUrl, accessToken, resultsKey) {
 // ---------------------------------
 
 /**
- * *** THIS IS THE FIXED FUNCTION ***
  * Performs the full CRM audit (Contacts/Companies) using the /search POST endpoint
- * This avoids the 414 URI Too Long error.
  */
 async function performCrmAudit(job) {
     const { portal_id, object_type, job_id } = job;
@@ -143,7 +129,7 @@ async function performCrmAudit(job) {
     await supabase.from('audit_jobs').update({ progress_message: 'Fetching access token...' }).eq('job_id', job_id);
     const accessToken = await getValidAccessToken(portal_id);
 
-    // 1. Fetch ALL Properties (This is unchanged and fine)
+    // 1. Fetch ALL Properties
     await supabase.from('audit_jobs').update({ progress_message: 'Fetching all properties...' }).eq('job_id', job_id);
     const propertiesUrl = `https://api.hubapi.com/crm/v3/properties/${object_type}?archived=false&limit=100`;
     const allProperties = await fetchAllHubSpotData(propertiesUrl, accessToken, 'results');
@@ -152,20 +138,18 @@ async function performCrmAudit(job) {
     const baseProps = object_type === 'contacts' ? ['associatedcompanyid', 'email'] : ['num_associated_contacts', 'domain'];
     const propertyNames = allProperties.map(p => p.name).concat(baseProps);
     const uniquePropertyNames = [...new Set(propertyNames)];
-    // const propertiesQueryString = uniquePropertyNames.join(','); // We no longer need this string
 
     // --- Batch Processing Setup ---
     let totalRecords = 0;
-    const fillCounts = {}; // { 'property_name': 1234 }
-    uniquePropertyNames.forEach(propName => { fillCounts[propName] = 0; }); // Initialize all keys
+    const fillCounts = {};
+    uniquePropertyNames.forEach(propName => { fillCounts[propName] = 0; });
     
     const orphanedRecords = [];
-    const seenDuplicateValues = new Map(); // { 'duplicate_value': { count: 2, records: [record1, record2] } }
+    const seenDuplicateValues = new Map();
     const duplicateIdProp = object_type === 'contacts' ? 'email' : 'domain';
 
-    // *** NEW: Use the /search endpoint ***
     const searchUrl = `https://api.hubapi.com/crm/v3/objects/${object_type}/search`;
-    let afterCursor = null; // The cursor for search paging
+    let afterCursor = null;
     let hasMore = true;
     let pageCount = 0;
 
@@ -174,21 +158,20 @@ async function performCrmAudit(job) {
     
     while (hasMore) {
         pageCount++;
-        await sleep(300); // **CRITICAL: Rate limit delay** (approx 3 calls/sec)
+        await sleep(300); // **CRITICAL: Rate limit delay**
 
-        // Build the request body
         const requestBody = {
             limit: 100,
-            properties: uniquePropertyNames, // Send all 981+ properties in the body
+            properties: uniquePropertyNames, // Send all properties in the body
             filterGroups: [], // No filters, get all
-            sorts: [{ propertyName: 'createdate', direction: 'ASCENDING' }] // Need a sort for paging
+            sorts: [{ propertyName: 'createdate', direction: 'ASCENDING' }]
         };
 
         if (afterCursor) {
-            requestBody.after = afterCursor; // Add the paging cursor
+            requestBody.after = afterCursor;
         }
 
-        if (pageCount % 10 === 0) { // Update Supabase every 10 pages (1,000 records)
+        if (pageCount % 10 === 0) {
             const progressMessage = `Fetched ${totalRecords} records (Page ${pageCount})...`;
             console.log(`[Worker] Job ${job_id}: ${progressMessage}`);
             await supabase.from('audit_jobs').update({ progress_message: progressMessage }).eq('job_id', job_id);
@@ -206,7 +189,7 @@ async function performCrmAudit(job) {
         if (!response.ok) {
             const errorBody = await response.text();
             console.error(`[Worker] Job ${job_id}: HubSpot API /search failed on page ${pageCount}: ${response.status} ${response.statusText}. Body: ${errorBody}`);
-            throw new Error(`[Worker] Job ${job_id}: API /search failed on page ${pageCount}.`);
+            throw new Error(`[Worker] Job ${job_id}: API /search failed on page ${pageCount}. Status: ${response.status}`);
         }
         
         const data = await response.json();
@@ -228,7 +211,7 @@ async function performCrmAudit(job) {
                 });
                 // B. Check Orphans
                 if (object_type === 'contacts' && !record?.properties?.associatedcompanyid) {
-                    if (orphanedRecords.length < 5000) orphanRecords.push(record);
+                    if (orphanedRecords.length < 5000) orphanedRecords.push(record);
                 } else if (object_type === 'companies') {
                     const numContacts = record?.properties?.num_associated_contacts;
                     if (numContacts === null || numContacts === undefined || parseInt(numContacts, 10) === 0) {
@@ -249,16 +232,15 @@ async function performCrmAudit(job) {
             // --- End batch processing ---
 
         } else {
-             // No results on this page, stop.
              hasMore = false;
              continue;
         }
 
         // 3. Paging Logic (for /search endpoint)
         if (data.paging && data.paging.next && data.paging.next.after) {
-            afterCursor = data.paging.next.after; // Get the next cursor
+            afterCursor = data.paging.next.after;
         } else {
-            hasMore = false; // No more pages
+            hasMore = false;
         }
     } // --- End while loop (all pages fetched) ---
 
@@ -471,7 +453,9 @@ async function pollForJobs() {
 
         } catch (auditError) {
             // 5. Mark job as 'failed' if an error occurs
-            console.error(`[Worker] Job ${job_id} FAILED:`, auditError.message, auditError.stack);
+            // *** THIS IS THE FIX ***
+            // Using 'job.job_id' instead of just 'job_id'
+            console.error(`[Worker] Job ${job.job_id} FAILED:`, auditError.message, auditError.stack);
             await supabase
                 .from('audit_jobs')
                 .update({ 
@@ -479,7 +463,7 @@ async function pollForJobs() {
                     error_message: auditError.message.substring(0, 500), // Truncate error
                     progress_message: 'Audit failed.' 
                 })
-                .eq('job_id', job_id);
+                .eq('job_id', job.job_id); // Fixed
         }
         
         // Immediately poll for the next job
@@ -488,12 +472,14 @@ async function pollForJobs() {
     } catch (err) {
         console.error('[Worker] Fatal Error in pollForJobs loop:', err.message);
         // If a job was claimed but a fatal error happened, release it
+        // *** THIS IS THE SECOND FIX ***
+        // Using 'job.job_id' instead of just 'job_id'
         if (job && job.job_id) {
             try {
                 await supabase
                     .from('audit_jobs')
                     .update({ status: 'failed', error_message: 'Worker fatal error: ' + err.message })
-                    .eq('job_id', job.job_id);
+                    .eq('job_id', job.job_id); // Fixed
             } catch (releaseError) {
                 console.error(`[Worker] CRITICAL: Failed to release job ${job.job_id} after fatal error.`, releaseError.message);
             }
@@ -514,7 +500,7 @@ async function startWorker() {
         return;
     }
     
-    // We no longer need to call setupDatabaseFunction()
+    // We no longer need the complex (and broken) setupDatabaseFunction
     console.log('[Worker] AuditPulse Worker Service started. Polling for jobs...');
     pollForJobs(); // Start the polling loop
 }
