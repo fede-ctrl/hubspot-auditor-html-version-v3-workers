@@ -1,5 +1,6 @@
 // This script runs on the 'auditpulsepro-web' service.
 // It handles web requests, creates jobs, and reports status.
+// FIX: Re-ordered OPTIONAL_SCOPES to exactly match the app's configuration.
 
 require('dotenv').config();
 const express = require('express');
@@ -30,7 +31,6 @@ const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
 // --- Helper: Get Access Token ---
-// This is still needed for OAuth callbacks and scope checks
 async function getValidAccessToken(portalId) {
     const { data: installation, error } = await supabase.from('installations').select('refresh_token, access_token, expires_at').eq('hubspot_portal_id', portalId).single();
     if (error || !installation) throw new Error(`Could not find installation for portal ${portalId}. Please reinstall the app.`);
@@ -49,16 +49,23 @@ async function getValidAccessToken(portalId) {
 
 // --- API Routes ---
 
-// 1. Install & OAuth (Unchanged, but ensure RENDER_EXTERNAL_URL is set in Render)
+// 1. Install & OAuth
 app.get('/api/install', (req, res) => {
     if (!RENDER_EXTERNAL_URL) {
         console.error("CRITICAL: RENDER_EXTERNAL_URL environment variable is not set.");
         return res.status(500).send("<h1>Configuration Error</h1><p>The server is missing the RENDER_EXTERNAL_URL environment variable. Cannot proceed with installation.</p>");
     }
     console.log("Redirect URI:", REDIRECT_URI);
+    
     const REQUIRED_SCOPES = 'oauth crm.objects.companies.read crm.schemas.contacts.read crm.objects.contacts.read crm.schemas.companies.read';
-    const OPTIONAL_SCOPES = 'automation crm.schemas.deals.read business-intelligence crm.objects.owners.read crm.objects.deals.read crm.objects.tickets.read crm.schemas.tickets.read';
+    
+    // *** THIS IS THE FIX ***
+    // Re-ordered to exactly match your working install URL's optional_scope parameter.
+    const OPTIONAL_SCOPES = 'tickets crm.schemas.deals.read automation business-intelligence crm.objects.owners.read crm.objects.deals.read';
+    
     const authUrl = `https://app.hubspot.com/oauth/authorize?client_id=${CLIENT_ID}&redirect_uri=${REDIRECT_URI}&scope=${REQUIRED_SCOPES}&optional_scope=${OPTIONAL_SCOPES}`;
+    
+    console.log("Generated Auth URL:", authUrl); // Log the URL we are building
     res.redirect(authUrl);
 });
 
@@ -106,7 +113,7 @@ app.get('/api/oauth-callback', async (req, res) => {
     }
 });
 
-// 2. Scope Check (Unchanged)
+// 2. Scope Check
 app.get('/api/check-scopes', async (req, res) => {
     const portalId = req.header('X-HubSpot-Portal-Id');
     if (!portalId) return res.status(400).json({ message: 'HubSpot Portal ID is missing.' });
@@ -135,7 +142,6 @@ app.get('/api/check-scopes', async (req, res) => {
 
 
 // 3. *** NEW: Create Audit Job ***
-// This single endpoint replaces BOTH /api/audit and /api/workflow-audit
 app.post('/api/create-audit-job', async (req, res) => {
     const portalId = req.header('X-HubSpot-Portal-Id');
     const { objectType } = req.body; // 'contacts', 'companies', 'workflows'
@@ -236,8 +242,7 @@ app.get('/api/audit-status/:jobId', async (req, res) => {
 });
 
 
-// 5. Excel Download (Unchanged logic, but called differently by frontend)
-// The frontend will now call this *after* it has the results.
+// 5. Excel Download (Unchanged logic)
 app.post('/api/download-excel', async (req, res) => {
     const { auditData, auditType, objectType } = req.body; 
 
