@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" type="image/x-icon" href="/logo3.png">
-    <title>AuditPulse</title>
+    <title>AuditPulse Pro</title> <!-- Renamed for clarity -->
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         .loader { border: 4px solid #f3f3f3; border-top: 4px solid #f97316; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; }
@@ -28,7 +28,7 @@
         <!-- Welcome Screen (No Auth) -->
         <div id="welcome-container" class="text-center hidden">
             <img src="/logo3.png" alt="App Logo" class="w-40 h-40 mb-4 mx-auto"/>
-            <h1 class="text-4xl font-bold text-gray-900">Welcome to AuditPulse</h1>
+            <h1 class="text-4xl font-bold text-gray-900">Welcome to AuditPulse Pro</h1>
             <p class="text-lg text-gray-600 mt-4 max-w-2xl mx-auto">Get actionable insights into your HubSpot data. Audit property fill rates, identify data health issues, and find unused assets to clean up your portal.</p>
             <div class="mt-8">
                 <a href="/api/install" class="bg-orange-500 hover:bg-orange-600 text-white font-bold py-3 px-6 rounded-lg text-lg transition-colors">Connect Your HubSpot Account</a>
@@ -40,7 +40,7 @@
             <div class="relative flex flex-col items-center">
                     <button id="disconnect-btn" class="absolute top-0 right-0 bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-4 rounded transition-colors">Disconnect</button>
                 <img src="/logo3.png" alt="App Logo" class="w-40 h-40 mb-4"/>
-                <h1 class="text-3xl font-bold text-gray-900">AuditPulse</h1>
+                <h1 class="text-3xl font-bold text-gray-900">AuditPulse Pro</h1>
                 <p class="text-gray-500 mt-2">Authenticated for HubSpot Portal ID: <span id="portal-id" class="font-mono font-semibold"></span></p>
             </div>
             
@@ -48,7 +48,6 @@
             <div class="my-8 flex justify-center flex-wrap gap-4">
                 <button id="audit-contacts-btn" class="bg-orange-500 hover:bg-orange-600 text-white font-bold py-2 px-4 rounded transition-colors disabled:bg-gray-400">Audit Contacts</button>
                 <button id="audit-companies-btn" class="bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded transition-colors disabled:bg-gray-400">Audit Companies</button>
-                <!-- **MODIFIED** - Workflow button is now functional -->
                 <button id="audit-workflows-btn" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded transition-colors disabled:bg-gray-400">Audit Workflows</button>
                 <button id="audit-reports-btn" class="bg-gray-400 text-white font-bold py-2 px-4 rounded cursor-not-allowed" title="Coming Soon">Audit Stale Reports</button>
             </div>
@@ -66,7 +65,6 @@
                 <div id="results-table-container" class="my-8">
                     <div class="flex justify-between items-center mb-4 flex-wrap gap-4">
                         <h2 class="text-2xl font-semibold">Property Details</h2>
-                        <!-- **MODIFIED** - ID changed -->
                         <button id="download-excel-btn-crm" class="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded transition-colors cursor-pointer">Download Full Report (Excel)</button>
                     </div>
                     <div id="crm-table-content" class="overflow-x-auto bg-white rounded-lg shadow">
@@ -94,8 +92,8 @@
                 <div class="mb-4">
                     <a href="#" id="about-btn" class="text-gray-500 hover:underline mx-2">About This App</a>
                     <a href="mailto:info@cassandraadvisory.com" class="text-orange-500 hover:underline mx-2">Contact Support</a>
-                    <a href="https://www.cassandraadvisory.com/privacy-policy" target="_blank" rel="noopener noreferrer" class="hover:underline mx-2">Privacy Policy</a>
-                    <a href="https://www.cassandraadvisory.com/terms-of-service" target="_blank" rel="noopener noreferrer" class="hover:underline mx-2">Terms of Service</a>
+                    <a href="https.www.cassandraadvisory.com/privacy-policy" target="_blank" rel="noopener noreferrer" class="hover:underline mx-2">Privacy Policy</a>
+                    <a href="https.www.cassandraadvisory.com/terms-of-service" target="_blank" rel="noopener noreferrer" class="hover:underline mx-2">Terms of Service</a>
                 </div>
                 <p class="italic">This application is independent of HubSpot, Inc., and is not authorized by, endorsed by, sponsored by, affiliated with, or otherwise approved by HubSpot, Inc.</p>
             </footer>
@@ -115,12 +113,13 @@
 
     <!-- About Modal -->
     <div id="about-modal" class="fixed inset-0 z-50 flex items-center justify-center modal-backdrop hidden">
-        <div class="bg-white rounded-lg shadow-xl p-8 w-full max-w-lg mx-4">
+         <div class="bg-white rounded-lg shadow-xl p-8 w-full max-w-lg mx-4">
             <div class="flex justify-between items-center mb-4">
                 <h3 class="text-xl font-bold">About AuditPulse</h3>
                 <button id="close-about-btn" class="text-gray-500 hover:text-gray-800 text-2xl font-bold">&times;</button>
             </div>
             <div id="about-text" class="text-gray-700 space-y-4">
+                 <!-- Content injected by JS -->
             </div>
         </div>
     </div>
@@ -128,16 +127,19 @@
     <script>
         document.addEventListener('DOMContentLoaded', () => {
             let portalId = '';
-            const API_URL = '';
+            const API_URL = ''; // We are on the same origin
             
             // --- State Variables ---
-            // **MODIFIED** - Data state is now split by audit type
             let currentCrmData = {};
             let currentWorkflowData = [];
             let currentObjectType = '';
             let currentAuditType = ''; // 'crm' or 'workflows'
             let currentCrmSortDir = 'asc';
-            let hasAutomationScope = false; // **NEW** - Tracks workflow scope
+            let hasAutomationScope = false;
+            
+            // **NEW**: Job Polling State
+            let currentJobId = null;
+            let jobPollInterval = null;
             
             const elements = {
                 welcomeContainer: document.getElementById('welcome-container'),
@@ -176,17 +178,20 @@
                 aboutBtn: document.getElementById('about-btn'), 
                 closeAboutBtn: document.getElementById('close-about-btn'), 
                 aboutText: document.getElementById('about-text'),
+                
+                // Audit Buttons
+                auditContactsBtn: document.getElementById('audit-contacts-btn'),
+                auditCompaniesBtn: document.getElementById('audit-companies-btn')
             };
 
-            const aboutContent = `
+            // About content
+            elements.aboutText.innerHTML = `
                 <p>AuditPulse is designed to provide HubSpot administrators with a quick and actionable overview of their portal's data health and property utilization.</p>
                 <div>
-                    <h4 class="font-semibold">How It Works (Transparency)</h4>
-                    <p class="text-sm">To provide a fast and comprehensive audit, this app analyzes all of your records via the HubSpot API. The "Fill Rate" and "Fill Count" for each property are calculated based on your entire database. This provides a complete and accurate audit of your data quality.</p>
+                    <h4 class="font-semibold">How It Works (Async)</h4>
+                    <p class="text-sm">When you start an audit, a job is submitted to a background worker. This allows the app to process large amounts of data (like 25,000+ contacts) without timing out. The app will poll for updates and display the results here when complete.</p>
                 </div>
-                <p>For support, please contact <a href="mailto:info@cassandraadvisory.com" class="text-blue-600 hover:underline">info@cassandraadvisory.com</a>.</p>
-            `;
-            elements.aboutText.innerHTML = aboutContent;
+                <p>For support, please contact <a href="mailto:info@cassandraadvisory.com" class="text-blue-600 hover:underline">info@cassandraadvisory.com</a>.</p>`;
             
             // --- App Initialization ---
             const initApp = () => {
@@ -198,14 +203,13 @@
                     elements.welcomeContainer.classList.add('hidden');
                     elements.appContainer.classList.remove('hidden');
                     window.history.replaceState({}, document.title, window.location.pathname);
-                    checkScopes(); // **NEW** - Check scopes on load
+                    checkScopes();
                 } else {
                     elements.welcomeContainer.classList.remove('hidden');
                     elements.appContainer.classList.add('hidden');
                 }
             };
 
-            // **NEW** - Check granted scopes on app load
             const checkScopes = async () => {
                 try {
                     const response = await fetch(`${API_URL}/api/check-scopes`, {
@@ -216,17 +220,15 @@
                     if (Array.isArray(scopes) && scopes.includes('automation')) {
                         hasAutomationScope = true;
                     }
+                    // We could add checks for 'crm.objects.deals.read' etc. here too
                 } catch (err) {
                     console.error('Scope check failed:', err.message);
-                    // Fail silently, the audit button click will handle the error.
                 }
             };
 
             const disconnect = async () => {
-                // **MODIFIED** - Using custom modal for confirm
-                showError('Are you sure you want to disconnect? This will remove all stored authentication data. (Functionality to confirm this pending, for now, disconnecting...)');
-                // A real modal would be needed here. For now, just proceeding.
-                // if (!confirm('Are you sure you want to disconnect? This will remove all stored authentication data.')) return;
+                // Using a simple confirm for now
+                if (!window.confirm('Are you sure you want to disconnect?')) return;
                 
                 try {
                     const response = await fetch(`${API_URL}/api/disconnect`, {
@@ -237,25 +239,21 @@
                         const errorData = await response.json();
                         throw new Error(errorData.message || 'Failed to disconnect');
                     }
-                    // **MODIFIED** - Using custom modal for alert
-                    showError('Successfully disconnected. Reloading...');
-                    setTimeout(() => {
-                         window.location.href = window.location.pathname;
-                    }, 2000);
+                    alert('Successfully disconnected. Reloading...');
+                    window.location.href = window.location.pathname;
                 } catch (err) {
-                    showError(`Could not disconnect: ${err.message}. Please revoke access from within your HubSpot portal.`);
+                    showError(`Could not disconnect: ${err.message}.`);
                 }
             };
             
             // --- UI Helper Functions ---
             
             const setButtonsDisabled = (d) => {
-                document.getElementById('audit-contacts-btn').disabled = d;
-                document.getElementById('audit-companies-btn').disabled = d;
+                elements.auditContactsBtn.disabled = d;
+                elements.auditCompaniesBtn.disabled = d;
                 elements.auditWorkflowsBtn.disabled = d;
             };
             
-            // **MODIFIED** - Simplified loading message
             const showLoading = (message = "Auditing...") => {
                 hideAllSections();
                 elements.loadingText.textContent = message;
@@ -268,9 +266,13 @@
                 setButtonsDisabled(false);
             };
             
-            const showError = (m) => { hideLoading(); hideAllSections(); elements.errorMessage.textContent = m; elements.error.classList.remove('hidden'); };
+            const showError = (m) => { 
+                hideLoading(); 
+                hideAllSections(); 
+                elements.errorMessage.textContent = m; 
+                elements.error.classList.remove('hidden'); 
+            };
             
-            // **MODIFIED** - Hides all possible result containers
             const hideAllSections = () => { 
                 elements.error.classList.add('hidden'); 
                 elements.crmResultsContainer.classList.add('hidden'); 
@@ -278,30 +280,136 @@
             };
             
             const createStatCard = (l, v, type, tooltipText) => {
-                const isClickable = type && v !== '0';
+                const isClickable = type && v !== '0' && v !== 0;
                 const valueHtml = isClickable ? `<span class="text-blue-600 hover:underline cursor-pointer" data-drilldown="${type}" data-title="${l}">${v}</span>` : v;
                 const tooltipHtml = tooltipText ? `<div class="tooltip inline-block ml-2"><svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg><span class="tooltiptext">${tooltipText}</span></div>` : '';
                 return `<div class="bg-white border border-gray-200 rounded-lg p-6 text-center"><div class="text-3xl font-bold text-gray-800">${valueHtml}</div><div class="text-sm text-gray-500 mt-1 flex items-center justify-center">${l}${tooltipHtml}</div></div>`;
             };
 
-            // --- CRM Audit Functions ---
-            
-            const runCrmAudit = async (objectType) => {
-                showLoading(`Auditing all ${objectType}... This may take a while.`);
-                currentObjectType = objectType;
-                currentAuditType = 'crm';
-                
-                try {
-                    const response = await fetch(`${API_URL}/api/audit?objectType=${objectType}`, { headers: { 'X-HubSpot-Portal-Id': portalId } });
-                    const data = await response.json();
-                    if (!response.ok) throw new Error(data.message);
-                    
-                    currentCrmData = data.data; // Data is in the 'data' property
-                    displayCrmResults(currentCrmData);
-                    
-                } catch (err) { showError(err.message); } finally { hideLoading(); }
+            // -------------------------------------
+            // --- NEW: Job Creation & Polling ---
+            // -------------------------------------
+
+            /**
+             * Stops any active job polling.
+             */
+            const stopPolling = () => {
+                if (jobPollInterval) {
+                    clearInterval(jobPollInterval);
+                    jobPollInterval = null;
+                }
+                currentJobId = null;
+                setButtonsDisabled(false); // Re-enable buttons
             };
 
+            /**
+             * Starts a new audit job on the backend.
+             */
+            const startAuditJob = async (objectType) => {
+                // Special check for 'workflows' scope
+                if (objectType === 'workflows' && !hasAutomationScope) {
+                    showError('Workflow Audit requires the "Automation" scope. You did not grant this permission during installation. Please disconnect and reinstall the app, ensuring you grant this permission.');
+                    return;
+                }
+                
+                if (currentJobId) {
+                    showError("An audit is already in progress. Please wait for it to complete.");
+                    return;
+                }
+                
+                showLoading("Submitting audit job...");
+                
+                try {
+                    const response = await fetch(`${API_URL}/api/create-audit-job`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-HubSpot-Portal-Id': portalId
+                        },
+                        body: JSON.stringify({ objectType: objectType })
+                    });
+
+                    const data = await response.json();
+                    if (!response.ok) {
+                        throw new Error(data.message || 'Failed to create job.');
+                    }
+                    
+                    currentJobId = data.jobId;
+                    console.log("Job created with ID:", currentJobId);
+                    // Start polling for status
+                    pollForStatus(currentJobId, objectType);
+
+                } catch (err) {
+                    showError(err.message);
+                    stopPolling();
+                }
+            };
+            
+            /**
+             * Polls the backend for the status of a specific job ID.
+             */
+            const pollForStatus = (jobId, objectType) => {
+                if (jobPollInterval) clearInterval(jobPollInterval); // Clear any old pollers
+
+                jobPollInterval = setInterval(async () => {
+                    if (!currentJobId) {
+                        clearInterval(jobPollInterval);
+                        return;
+                    }
+
+                    try {
+                        const response = await fetch(`${API_URL}/api/audit-status/${jobId}`, {
+                            headers: { 'X-HubSpot-Portal-Id': portalId }
+                        });
+                        
+                        if (!response.ok) {
+                            // If status check fails (e.g., 404, 500), stop polling
+                            throw new Error('Audit status check failed. Stopping.');
+                        }
+
+                        const data = await response.json();
+                        
+                        switch (data.status) {
+                            case 'pending':
+                            case 'running':
+                                // Update loading message with progress
+                                showLoading(data.progress_message || 'Audit is running...');
+                                break;
+                            case 'failed':
+                                // Job failed
+                                showError(data.error_message || 'The audit job failed.');
+                                stopPolling();
+                                break;
+                            case 'complete':
+                                // Job Success!
+                                hideLoading();
+                                stopPolling();
+                                console.log("Job complete. Results:", data.results);
+                                // Pass results to the correct display function
+                                if (data.results.auditType === 'crm') {
+                                    currentObjectType = data.results.objectType;
+                                    currentCrmData = data.results.data; // The payload is in data.results.data
+                                    displayCrmResults(currentCrmData);
+                                } else if (data.results.auditType === 'workflows') {
+                                    currentWorkflowData = data.results.results; // The payload is in data.results.results
+                                    displayWorkflowResults(currentWorkflowData);
+                                }
+                                break;
+                            default:
+                                throw new Error(`Unknown job status: ${data.status}`);
+                        }
+
+                    } catch (err) {
+                        showError(err.message);
+                        stopPolling();
+                    }
+                }, 5000); // Poll every 5 seconds
+            };
+
+            // -------------------------------------
+            // --- Result Display Functions (Mostly Unchanged) ---
+            // -------------------------------------
+            
             const displayCrmResults = (data) => {
                 hideAllSections();
                 const objectType = currentObjectType;
@@ -318,12 +426,15 @@
                 elements.auditTimestamp.textContent = `Audit completed at: ${new Date().toLocaleString()}`;
                 
                 if (data.properties.length === 0) {
-                    elements.crmTableContent.innerHTML = `<p class="text-center p-10 text-gray-500">No properties found to audit for this object type.</p>`;
+                    elements.crmTableContent.innerHTML = `<p class="text-center p-10 text-gray-500">No properties found.</p>`;
                 } else {
                     elements.crmTableContent.innerHTML = `<table class="w-full divide-y divide-gray-200"><thead class="bg-gray-50"><tr><th class="w-[35%] px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Property Label</th><th class="w-[15%] px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Source</th><th class="w-[20%] px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Filled Records</th><th id="fill-rate-header" class="w-[30%] px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider sortable sort-asc">Fill Rate</th></tr></thead><tbody id="properties-tbody" class="bg-white"></tbody></table>`;
                     
-                    // Re-add event listener as table is rebuilt
-                    document.getElementById('fill-rate-header').addEventListener('click', () => { currentCrmSortDir = currentCrmSortDir === 'asc' ? 'desc' : 'asc'; sortAndRenderCrmTable(); });
+                    // Need to re-add listener *after* table is created
+                    document.getElementById('fill-rate-header').addEventListener('click', () => { 
+                        currentCrmSortDir = currentCrmSortDir === 'asc' ? 'desc' : 'asc'; 
+                        sortAndRenderCrmTable(); 
+                    });
                     
                     sortAndRenderCrmTable();
                 }
@@ -335,43 +446,23 @@
                 currentCrmData.properties.forEach((p, index) => {
                     tableHtml += `<tr class="border-t border-gray-200"><td class="px-4 py-4 text-sm font-medium text-gray-900 break-words"><button class="details-toggle-btn text-blue-600 hover:text-blue-800 mr-2 font-bold text-lg" data-target-id="details-${index}">+</button>${p.label}</td><td class="px-4 py-4 text-sm font-semibold ${p.isCustom ? 'text-blue-600' : 'text-gray-600'}">${p.isCustom ? 'Custom' : 'Standard'}</td><td class="px-4 py-4 text-sm text-gray-500 text-right">${p.fillCount.toLocaleString()}</td><td class="px-4 py-4 text-sm text-gray-500"><div class="flex items-center"><div class="w-full bg-gray-200 rounded-full h-2.5"><div class="h-2.5 rounded-full ${p.fillRate < 25 ? 'bg-red-500' : 'bg-green-500'}" style="width: ${p.fillRate}%"></div></div><span class="ml-3 font-semibold w-10 text-right">${p.fillRate}%</span></div></td></tr><tr id="details-${index}" class="hidden details-row"><td colspan="4" class="p-4"><dl class="grid grid-cols-1 sm:grid-cols-3 gap-x-4 gap-y-2 text-sm"><dt class="font-semibold text-gray-600">Internal Name:</dt><dd class="sm:col-span-2 font-mono text-gray-800 break-all">${p.internalName}</dd><dt class="font-semibold text-gray-600">Type:</dt><dd class="sm:col-span-2 text-gray-800">${p.type}</dd><dt class="font-semibold text-gray-600">Description:</dt><dd class="sm:col-span-2 text-gray-800 italic">${p.description ? p.description : 'No description provided.'}</dd></dl></td></tr>`;
                 });
-                document.getElementById('properties-tbody').innerHTML = tableHtml;
+                // Ensure properties-tbody exists before setting innerHTML
+                const tbody = document.getElementById('properties-tbody');
+                if (tbody) {
+                    tbody.innerHTML = tableHtml;
+                }
             };
             
             const sortAndRenderCrmTable = () => { 
                 currentCrmData.properties.sort((a,b) => currentCrmSortDir === 'asc' ? a.fillRate - b.fillRate : b.fillRate - a.fillRate); 
-                document.getElementById('fill-rate-header').classList.toggle('sort-asc', currentCrmSortDir === 'asc'); 
-                document.getElementById('fill-rate-header').classList.toggle('sort-desc', currentCrmSortDir === 'desc'); 
+                const header = document.getElementById('fill-rate-header');
+                if (header) { // Add check in case table wasn't rendered
+                    header.classList.toggle('sort-asc', currentCrmSortDir === 'asc'); 
+                    header.classList.toggle('sort-desc', currentCrmSortDir === 'desc'); 
+                }
                 renderCrmTable(); 
             };
             
-            // --- Workflow Audit Functions ---
-
-            // **NEW** - Runs the workflow audit
-            const runWorkflowAudit = async () => {
-                // Proactive frontend scope check
-                if (!hasAutomationScope) {
-                    showError('Workflow Audit requires the "Automation" scope. You did not grant this permission during installation. Please disconnect and reinstall the app, ensuring you check the "Automation" box on the HubSpot authorization screen.');
-                    return;
-                }
-
-                showLoading('Auditing all workflows... This may take a moment.');
-                currentAuditType = 'workflows';
-                
-                try {
-                    const response = await fetch(`${API_URL}/api/workflow-audit`, { headers: { 'X-HubSpot-Portal-Id': portalId } });
-                    const data = await response.json();
-                    
-                    // This will catch the 403 from the server as well
-                    if (!response.ok) throw new Error(data.message);
-                    
-                    currentWorkflowData = data.results; // This is the array of findings
-                    displayWorkflowResults(currentWorkflowData);
-                    
-                } catch (err) { showError(err.message); } finally { hideLoading(); }
-            };
-            
-            // **NEW** - Renders the workflow results table
             const displayWorkflowResults = (results) => {
                 hideAllSections();
                 elements.workflowAuditTimestamp.textContent = `Audit completed at: ${new Date().toLocaleString()}`;
@@ -405,84 +496,73 @@
                 elements.workflowResultsContainer.classList.remove('hidden');
             };
 
-            // --- Excel Download Functions ---
+            // --- Excel Download Functions (Now use state variables) ---
             
             async function downloadExcelReportCrm() {
-                const button = elements.downloadExcelBtnCrm;
-                button.textContent = 'Generating...';
-                button.disabled = true;
-                try {
-                    const response = await fetch(`${API_URL}/api/download-excel`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ 
-                            auditData: { data: currentCrmData }, // Send nested data
-                            auditType: 'crm', 
-                            objectType: currentObjectType 
-                        })
-                    });
-                    if (!response.ok) throw new Error('Failed to generate Excel report.');
-                    
-                    const blob = await response.blob();
-                    const url = window.URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.style.display = 'none';
-                    a.href = url;
-                    a.download = `AuditPulse-Report-${currentObjectType}-${new Date().toISOString().split('T')[0]}.xlsx`;
-                    document.body.appendChild(a);
-                    a.click();
-                    window.URL.revokeObjectURL(url);
-                    document.body.removeChild(a);
-                } catch (error) {
-                    showError('Could not download Excel report. Please try again.');
-                } finally {
-                    button.textContent = 'Download Full Report (Excel)';
-                    button.disabled = false;
+                if (!currentCrmData || !currentCrmData.properties) {
+                    showError("No CRM audit data to download. Please run an audit first.");
+                    return;
                 }
+                // Send the *current* data, which was set when the job completed
+                const body = { 
+                    auditData: { data: currentCrmData },
+                    auditType: 'crm', 
+                    objectType: currentObjectType 
+                };
+                await downloadExcel(body, `AuditPulse-Report-${currentObjectType}`);
             }
 
             async function downloadExcelReportWf() {
-                const button = elements.downloadExcelBtnWf;
+                if (!currentWorkflowData || currentWorkflowData.length === 0) {
+                     showError("No Workflow audit data to download. Please run an audit first.");
+                    return;
+                }
+                const body = { 
+                    auditData: { results: currentWorkflowData },
+                    auditType: 'workflows'
+                };
+                await downloadExcel(body, `AuditPulse-Report-Workflows`);
+            }
+            
+            async function downloadExcel(body, baseFileName) {
+                const button = body.auditType === 'crm' ? elements.downloadExcelBtnCrm : elements.downloadExcelBtnWf;
+                const originalText = button.textContent;
                 button.textContent = 'Generating...';
                 button.disabled = true;
+                
                 try {
                     const response = await fetch(`${API_URL}/api/download-excel`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ 
-                            auditData: { results: currentWorkflowData }, // Send results array
-                            auditType: 'workflows'
-                        })
+                        body: JSON.stringify(body)
                     });
-                    if (!response.ok) throw new Error('Failed to generate Excel report.');
+                    if (!response.ok) throw new Error('Failed to generate Excel report on server.');
                     
                     const blob = await response.blob();
                     const url = window.URL.createObjectURL(blob);
                     const a = document.createElement('a');
                     a.style.display = 'none';
                     a.href = url;
-                    a.download = `AuditPulse-Report-Workflows-${new Date().toISOString().split('T')[0]}.xlsx`;
+                    a.download = `${baseFileName}-${new Date().toISOString().split('T')[0]}.xlsx`;
                     document.body.appendChild(a);
                     a.click();
                     window.URL.revokeObjectURL(url);
                     document.body.removeChild(a);
                 } catch (error) {
-                    showError('Could not download Excel report. Please try again.');
+                    showError(`Could not download Excel report: ${error.message}`);
                 } finally {
-                    button.textContent = 'Download Workflow Report (Excel)';
+                    button.textContent = originalText;
                     button.disabled = false;
                 }
             }
             
-            // --- CRM Drill-down Modal Functions ---
+            // --- CRM Drill-down Modal Functions (Unchanged) ---
             
             const openDrillDown = (type, title) => {
                 elements.modalTitle.textContent = title;
                 elements.drillDownModal.classList.remove('hidden');
-                
                 let data, headers, rows;
                 
-                // Uses currentCrmData
                 if (type === 'missingDescription') {
                     data = currentCrmData.properties.filter(p => !p.description);
                     headers = ['Property Label', 'Internal Name', 'Type', 'Link'];
@@ -492,7 +572,7 @@
                     });
                 } else if (type === 'orphanedRecords') {
                     data = currentCrmData.orphanedRecords;
-                    if (currentObjectType === 'contacts') {
+                     if (currentObjectType === 'contacts') {
                         headers = ['Name', 'Email', 'Create Date', 'Link'];
                         rows = data.map(r => [ `${r.properties.firstname || ''} ${r.properties.lastname || ''}`, r.properties.email || 'N/A', new Date(r.properties.createdate).toLocaleDateString(), `<a href="https://app.hubspot.com/contacts/${portalId}/contact/${r.id}" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">View Record</a>` ]);
                     } else {
@@ -528,10 +608,10 @@
             
             elements.disconnectBtn.addEventListener('click', disconnect);
             
-            // Audit Buttons
-            document.getElementById('audit-contacts-btn').addEventListener('click', () => runCrmAudit('contacts'));
-            document.getElementById('audit-companies-btn').addEventListener('click', () => runCrmAudit('companies'));
-            elements.auditWorkflowsBtn.addEventListener('click', runWorkflowAudit);
+            // **NEW**: Audit Buttons point to startAuditJob
+            elements.auditContactsBtn.addEventListener('click', () => startAuditJob('contacts'));
+            elements.auditCompaniesBtn.addEventListener('click', () => startAuditJob('companies'));
+            elements.auditWorkflowsBtn.addEventListener('click', () => startAuditJob('workflows'));
             
             // Download Buttons
             elements.downloadExcelBtnCrm.addEventListener('click', downloadExcelReportCrm);
@@ -542,17 +622,18 @@
             elements.aboutBtn.addEventListener('click', (e) => { e.preventDefault(); elements.aboutModal.classList.remove('hidden'); });
             elements.closeAboutBtn.addEventListener('click', () => elements.aboutModal.classList.add('hidden'));
 
-            // Event delegation for dynamic content (CRM table)
+            // Event delegation for dynamic content
             document.body.addEventListener('click', (e) => {
                 // CRM Property details toggle
                 const toggle = e.target.closest('.details-toggle-btn');
                 if (toggle) {
                     const targetId = toggle.dataset.targetId;
                     const detailsRow = document.getElementById(targetId);
-                    detailsRow.classList.toggle('hidden');
-                    toggle.textContent = detailsRow.classList.contains('hidden') ? '+' : '-';
+                    if(detailsRow) {
+                        detailsRow.classList.toggle('hidden');
+                        toggle.textContent = detailsRow.classList.contains('hidden') ? '+' : '-';
+                    }
                 }
-                
                 // CRM Drill-down
                 const drilldown = e.target.closest('[data-drilldown]');
                 if (drilldown) {
