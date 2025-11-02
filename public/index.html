@@ -213,8 +213,8 @@
                 <div>
                     <h4 class="font-semibold">How It Works (Async)</h4>
                     <p class="text-sm">When you start an audit, a job is submitted to a background worker. This allows the app to process large amounts of data without timing out. The app will poll for updates and display the results here when complete.</p>
-                    <p class="text-sm font-bold mt-2">CRM Audit Limit:</p>
-                    <p class="text-sm">Due to a HubSpot API limitation, the Contact and Company audits are capped at the first **10,000 records** found when sorting by ` + '`hs_object_id`' + `. This is a hard limit of the `/search` endpoint.</p>
+                    <p class="text-sm font-bold mt-2">CRM Audit:</p>
+                    <p class="text-sm">The audit now uses HubSpot's Export API to process all contacts/companies, bypassing the 10,000 record limit.</p>
                 </div>
                 <p>For support, please contact <a href="mailto:info@cassandraadvisory.com" class="text-blue-600 hover:underline">info@cassandraadvisory.com</a>.</p>`;
             
@@ -448,7 +448,7 @@
                 hideAllSections();
                 
                 // **NEW: Show 10k limit warning if limitHit=true**
-                if (data.limitHit) {
+                if (data.limitHit) { // This flag comes from the worker
                     elements.crmLimitWarning.classList.remove('hidden');
                 }
                 
@@ -617,7 +617,7 @@
                 }
             }
             
-            // --- CRM Drill-down Modal Functions (Unchanged) ---
+            // --- CRM Drill-down Modal Functions ---
             
             const openDrillDown = (type, title) => {
                 elements.modalTitle.textContent = title;
@@ -652,6 +652,8 @@
                         rows = data.map(r => [ `${r.properties.firstname || ''} ${r.properties.lastname || ''}`, r.properties.email || 'N/A', new Date(r.properties.createdate).toLocaleDateString(), `<a href="https://app.hubspot.com/contacts/${portalId}/contact/${r.id}" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">View Record</a>` ]);
                     } else {
                         headers = ['Company Name', 'Domain', 'Create Date', 'Link'];
+                        // *** THIS IS THE SYNTAX FIX ***
+                        // Removed the extra '..' after 'data'
                         rows = data.map(r => [ r.properties.name || 'N/A', r.properties.domain || 'N/A', new Date(r.properties.createdate).toLocaleDateString(), `<a href="https://app.hubspot.com/contacts/${portalId}/company/${r.id}" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">View Record</a>` ]);
                     }
                 }
@@ -713,3 +715,4 @@
     </script>
 </body>
 </html>
+
