@@ -60,7 +60,7 @@
             
             <!-- ** NEW: CRM 10k Limit Warning Panel ** -->
             <div id="crm-limit-warning" class="my-8 hidden bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded-lg" role="alert">
-                <strong class="font-bold">Audit Incomplete:</strong> This audit was capped at the **first 10,000 records** due to a HubSpot API limitation. The fill rates and health checks are based only on this initial sample.
+                <strong class="font-bold">Audit Incomplete:</strong> This audit was capped at the **first 10,000 records** due to a HubSpot API limitation (sorting by `hs_object_id`). The fill rates and health checks are based only on this initial sample.
             </div>
 
             <!-- ===== CRM Results Container ===== -->
@@ -88,7 +88,7 @@
                     </div>
                     <!-- ** NEW: Incomplete Workflow Data Warning ** -->
                     <div id="workflow-incomplete-warning" class="mt-4 text-center text-sm text-yellow-700 font-semibold hidden">
-                        Warning: Due to a HubSpot API bug, this audit may be incomplete. Only the first page of workflows was returned.
+                        <strong>Warning:</strong> Due to a HubSpot API bug, this audit may be incomplete. Only the first page of workflows was returned (Total found: <span id="wf-incomplete-count">0</span>).
                     </div>
                 </div>
 
@@ -109,8 +109,8 @@
                 <div class="mb-4">
                     <a href="#" id="about-btn" class="text-gray-500 hover:underline mx-2">About This App</a>
                     <a href="mailto:info@cassandraadvisory.com" class="text-orange-500 hover:underline mx-2">Contact Support</a>
-                    <a href="https_www.cassandraadvisory.com/privacy-policy" target="_blank" rel="noopener noreferrer" class="hover:underline mx-2">Privacy Policy</a>
-                    <a href="https_www.cassandraadvisory.com/terms-of-service" target="_blank" rel="noopener noreferrer" class="hover:underline mx-2">Terms of Service</a>
+                    <a href="https://www.cassandraadvisory.com/privacy-policy" target="_blank" rel="noopener noreferrer" class="hover:underline mx-2">Privacy Policy</a>
+                    <a href="https://www.cassandraadvisory.com/terms-of-service" target="_blank" rel="noopener noreferrer" class="hover:underline mx-2">Terms of Service</a>
                 </div>
                 <p class="italic">This application is independent of HubSpot, Inc., and is not authorized by, endorsed by, sponsored by, affiliated with, or otherwise approved by HubSpot, Inc.</p>
             </footer>
@@ -187,6 +187,7 @@
                 workflowResultsContainer: document.getElementById('workflow-results-container'),
                 workflowKpiCards: document.getElementById('workflow-kpi-cards'), // **NEW**
                 workflowIncompleteWarning: document.getElementById('workflow-incomplete-warning'), // **NEW**
+                wfIncompleteCount: document.getElementById('wf-incomplete-count'), // **NEW**
                 workflowTableContent: document.getElementById('workflow-table-content'),
                 workflowAuditTimestamp: document.getElementById('workflow-audit-timestamp'),
                 downloadExcelBtnWf: document.getElementById('download-excel-btn-wf'),
@@ -213,7 +214,7 @@
                     <h4 class="font-semibold">How It Works (Async)</h4>
                     <p class="text-sm">When you start an audit, a job is submitted to a background worker. This allows the app to process large amounts of data without timing out. The app will poll for updates and display the results here when complete.</p>
                     <p class="text-sm font-bold mt-2">CRM Audit Limit:</p>
-                    <p class="text-sm">Due to a HubSpot API limitation, the Contact and Company audits are currently capped at the first **10,000 records** found when sorting by internal ID.</p>
+                    <p class="text-sm">Due to a HubSpot API limitation, the Contact and Company audits are capped at the first **10,000 records** found when sorting by ` + '`hs_object_id`' + `. This is a hard limit of the `/search` endpoint.</p>
                 </div>
                 <p>For support, please contact <a href="mailto:info@cassandraadvisory.com" class="text-blue-600 hover:underline">info@cassandraadvisory.com</a>.</p>`;
             
@@ -300,6 +301,7 @@
                 elements.crmResultsContainer.classList.add('hidden'); 
                 elements.workflowResultsContainer.classList.add('hidden');
                 elements.crmLimitWarning.classList.add('hidden'); // **NEW**
+                elements.workflowIncompleteWarning.classList.add('hidden'); // **NEW**
             };
             
             const createStatCard = (l, v, type, tooltipText) => {
@@ -416,7 +418,7 @@
                                 
                                 if (data.results.auditType === 'crm') {
                                     currentObjectType = data.results.objectType;
-                                    currentCrmData = data.results.data;
+                                    currentCrmData = data.results.data; // The payload is in data.results.data
                                     displayCrmResults(currentCrmData);
                                 } else if (data.results.auditType === 'workflows') {
                                     currentWorkflowData = data.results; // Full object { auditType, results, kpis }
@@ -454,13 +456,16 @@
                 const orphanLabel = objectType === 'contacts' ? 'Orphaned Contacts' : 'Empty Companies';
                 const duplicateLabel = `Duplicate ${objectType.charAt(0).toUpperCase() + objectType.slice(1)}`;
                 const tooltipText = `This is the number of extra records. E.g., if 3 records share an email, there are 2 duplicates.`;
+                const totalRecordsLabel = data.limitHit ? `Total ${objectType} (Sampled)` : `Total ${objectType}`;
+                const totalRecordsTooltip = data.limitHit ? "Audit capped at 10,000 records." : null;
+
 
                 elements.healthObjectType.textContent = objectType;
                 elements.dataHealthCards.innerHTML = `${createStatCard(orphanLabel, data.orphanedRecords.length.toLocaleString(), 'orphanedRecords')}${createStatCard(duplicateLabel, data.totalDuplicates.toLocaleString(), 'duplicateRecords', tooltipText)}`;
                 
                 const missingDescCount = data.properties.filter(p => !p.description).length;
                 elements.summaryObjectType.textContent = objectType;
-                elements.summaryCards.innerHTML = `${createStatCard(`Total ${objectType} (Sampled)`, data.totalRecords.toLocaleString(), null, "Audit capped at 10,000 records.")}${createStatCard('Total Properties', data.totalProperties.toLocaleString())}${createStatCard('Properties Missing Description', missingDescCount.toLocaleString(), 'missingDescription')}${createStatCard('Avg. Custom Prop. Fill Rate', `${data.averageCustomFillRate}%`)}`;
+                elements.summaryCards.innerHTML = `${createStatCard(totalRecordsLabel, data.totalRecords.toLocaleString(), null, totalRecordsTooltip)}${createStatCard('Total Properties', data.totalProperties.toLocaleString())}${createStatCard('Properties Missing Description', missingDescCount.toLocaleString(), 'missingDescription')}${createStatCard('Avg. Custom Prop. Fill Rate', `${data.averageCustomFillRate}%`)}`;
                 elements.auditTimestamp.textContent = `Audit completed at: ${new Date().toLocaleString()}`;
                 
                 if (data.properties.length === 0) {
@@ -516,6 +521,7 @@
                 
                 // **NEW: Show Incomplete Warning if flag is set**
                 if (kpis.isIncomplete) {
+                     elements.wfIncompleteCount.textContent = kpis.totalWorkflows.toLocaleString();
                      elements.workflowIncompleteWarning.classList.remove('hidden');
                 } else {
                      elements.workflowIncompleteWarning.classList.add('hidden');
@@ -618,6 +624,11 @@
                 elements.drillDownModal.classList.remove('hidden');
                 let data, headers, rows;
                 
+                if (!currentCrmData.properties) { // Guard clause
+                     elements.modalContent.innerHTML = `<p class="text-center p-6 text-gray-500">No data available.</p>`;
+                     return;
+                }
+
                 if (type === 'missingDescription') {
                     data = currentCrmData.properties.filter(p => !p.description);
                     headers = ['Property Label', 'Internal Name', 'Type', 'Link'];
@@ -641,7 +652,7 @@
                         rows = data.map(r => [ `${r.properties.firstname || ''} ${r.properties.lastname || ''}`, r.properties.email || 'N/A', new Date(r.properties.createdate).toLocaleDateString(), `<a href="https://app.hubspot.com/contacts/${portalId}/contact/${r.id}" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">View Record</a>` ]);
                     } else {
                         headers = ['Company Name', 'Domain', 'Create Date', 'Link'];
-                        rows = data..map(r => [ r.properties.name || 'N/A', r.properties.domain || 'N/A', new Date(r.properties.createdate).toLocaleDateString(), `<a href="https://app.hubspot.com/contacts/${portalId}/company/${r.id}" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">View Record</a>` ]);
+                        rows = data.map(r => [ r.properties.name || 'N/A', r.properties.domain || 'N/A', new Date(r.properties.createdate).toLocaleDateString(), `<a href="https://app.hubspot.com/contacts/${portalId}/company/${r.id}" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">View Record</a>` ]);
                     }
                 }
                 
