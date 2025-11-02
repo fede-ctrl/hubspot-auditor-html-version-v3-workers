@@ -1,18 +1,20 @@
 // This script runs on the 'auditpulsepro-worker' service.
 // It polls for jobs and executes the long-running audits.
-// FIX: Corrected a fatal ReferenceError in the catch blocks.
-// 'job_id' was used instead of 'job.job_id', crashing the worker on any audit failure.
+// FIX: Sped up workflow audit by reducing the per-workflow delay
+// from 250ms to 100ms to better match HubSpot's rate limits.
 
 require('dotenv').config();
 const { createClient } = require('@supabase/supabase-js');
 const fetch = require('node-fetch');
 
 // --- Supabase Client ---
+// Ensure these ENV VARS are set in the Render worker service
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
 // --- HubSpot API Clients ---
+// We need the HubSpot credentials here too
 const CLIENT_ID = process.env.HUBSPOT_CLIENT_ID;
 const CLIENT_SECRET = process.env.HUBSPOT_CLIENT_SECRET;
 
@@ -21,8 +23,12 @@ const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 // ---------------------------------
 // --- AUDIT HELPER FUNCTIONS ---
+// (These are now part of the worker)
 // ---------------------------------
 
+/**
+ * Gets a valid access token from Supabase, refreshing if needed.
+ */
 async function getValidAccessToken(portalId) {
     const { data: installation, error } = await supabase
         .from('installations')
@@ -61,6 +67,11 @@ async function getValidAccessToken(portalId) {
     return access_token;
 }
 
+/**
+ * Fetches *all pages* of data from a HubSpot endpoint.
+ * This is now used for Properties and Workflows (which are smaller lists).
+ * This is NOT used for the 25k contacts/companies list.
+ */
 async function fetchAllHubSpotData(initialUrl, accessToken, resultsKey) {
     const allResults = [];
     let currentUrl = initialUrl;
@@ -158,7 +169,7 @@ async function performCrmAudit(job) {
     
     while (hasMore) {
         pageCount++;
-        await sleep(300); // **CRITICAL: Rate limit delay**
+        await sleep(300); // **CRITICAL: Rate limit delay** (approx 3 calls/sec)
 
         const requestBody = {
             limit: 100,
@@ -311,7 +322,10 @@ async function performWorkflowAudit(job) {
     // 2. Loop and deep scan each workflow
     for (const workflow of allWorkflows) {
         processedCount++;
-        await sleep(250); // Rate limit
+        
+        // *** THIS IS THE FIX ***
+        // Changed from 250ms to 100ms
+        await sleep(100); // Rate limit (10 req/sec)
 
         if (processedCount % 10 === 0 || allWorkflows.length < 10) {
             const progressMessage = `Scanning workflow ${processedCount}/${allWorkflows.length}...`;
@@ -453,8 +467,6 @@ async function pollForJobs() {
 
         } catch (auditError) {
             // 5. Mark job as 'failed' if an error occurs
-            // *** THIS IS THE FIX ***
-            // Using 'job.job_id' instead of just 'job_id'
             console.error(`[Worker] Job ${job.job_id} FAILED:`, auditError.message, auditError.stack);
             await supabase
                 .from('audit_jobs')
@@ -463,7 +475,7 @@ async function pollForJobs() {
                     error_message: auditError.message.substring(0, 500), // Truncate error
                     progress_message: 'Audit failed.' 
                 })
-                .eq('job_id', job.job_id); // Fixed
+                .eq('job_id', job.job_id); // Use job.job_id
         }
         
         // Immediately poll for the next job
@@ -471,20 +483,16 @@ async function pollForJobs() {
 
     } catch (err) {
         console.error('[Worker] Fatal Error in pollForJobs loop:', err.message);
-        // If a job was claimed but a fatal error happened, release it
-        // *** THIS IS THE SECOND FIX ***
-        // Using 'job.job_id' instead of just 'job_id'
         if (job && job.job_id) {
             try {
                 await supabase
                     .from('audit_jobs')
                     .update({ status: 'failed', error_message: 'Worker fatal error: ' + err.message })
-                    .eq('job_id', job.job_id); // Fixed
+                    .eq('job_id', job.job_id); // Use job.job_id
             } catch (releaseError) {
                 console.error(`[Worker] CRITICAL: Failed to release job ${job.job_id} after fatal error.`, releaseError.message);
             }
         }
-        // Wait before trying again
         setTimeout(pollForJobs, 10000);
     }
 }
