@@ -135,7 +135,7 @@ async function performCrmAudit(job) {
 
     // 1. Fetch ALL Properties
     await supabase.from('audit_jobs').update({ progress_message: 'Fetching all properties...' }).eq('job_id', job_id);
-    // *** URL FIX 1 ***
+    // *** URL FIX 1 (Added https://) ***
     const propertiesUrl = `https://api.hubapi.com/crm/v3/properties/${object_type}?archived=false&limit=100`;
     const allProperties = await fetchAllHubSpotData(propertiesUrl, accessToken, 'results');
     console.log(`[Worker] Job ${job_id}: Fetched ${allProperties.length} properties.`);
@@ -156,7 +156,7 @@ async function performCrmAudit(job) {
     console.log(`[Worker] Job ${job_id}: Requesting HubSpot export for ${object_type}...`);
     await supabase.from('audit_jobs').update({ progress_message: 'Requesting HubSpot export...' }).eq('job_id', job_id);
     
-    // *** URL FIX 2 ***
+    // *** URL FIX 2 (Added https://) ***
     const exportRequestUrl = 'https://api.hubapi.com/crm/v3/exports/export/async';
     const exportRequestBody = {
         objectType: object_type,
@@ -185,7 +185,7 @@ async function performCrmAudit(job) {
     let exportStatus = 'PENDING';
     let fileUrl = null;
     
-    // *** URL FIX 3 ***
+    // *** URL FIX 3 (Added https://) ***
     const exportStatusUrl = `https://api.hubapi.com/crm/v3/exports/export/async/tasks/${exportId}/status`;
     let pollCount = 0;
 
@@ -323,7 +323,7 @@ async function performWorkflowAudit(job) {
     // 1. Fetch all workflow summaries using the V3 endpoint
     await supabase.from('audit_jobs').update({ progress_message: 'Fetching workflow list (V3)...' }).eq('job_id', job_id);
     
-    // *** URL FIX 4 ***
+    // *** URL FIX 4 (Added https://) ***
     const workflowsUrl = 'https://api.hubapi.com/automation/v3/workflows?limit=100';
     const allWorkflows = await fetchAllHubSpotData(workflowsUrl, accessToken, 'workflows');
     
@@ -484,9 +484,10 @@ async function pollForJobs() {
 
         } catch (auditError) {
             // 5. Mark job as 'failed' if an error occurs
-            console.error(`[Worker] Job ${job_id} FAILED:`, auditError.message, auditError.stack);
+            console.error(`[Worker] Job ${job.job_id} FAILED:`, auditError.message, auditError.stack);
             
-            // This also includes the fix for the 'job_id is not defined' error
+            // *** VARIABLE FIX (job.job_id) ***
+            // This stops the 'job_id is not defined' crash
             await supabase
                 .from('audit_jobs')
                 .update({ 
@@ -494,7 +495,7 @@ async function pollForJobs() {
                     error_message: auditError.message.substring(0, 500), 
                     progress_message: 'Audit failed.' 
                 })
-                .eq('job_id', job.job_id); // Use job.job_id
+                .eq('job_id', job.job_id); // Use job.job_id, NOT job_id
         }
         
         // Immediately poll for the next job
