@@ -35,7 +35,7 @@ async function getValidAccessToken(portalId) {
 
     if (new Date() > new Date(expires_at)) {
         console.log(`[Worker] Refreshing token for portal ${portalId}`);
-        const response = await fetch('https.api.hubapi.com/oauth/v1/token', { 
+        const response = await fetch('https://api.hubapi.com/oauth/v1/token', { // Checked: Correct URL
             method: 'POST', 
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, 
             body: new URLSearchParams({ 
@@ -135,7 +135,8 @@ async function performCrmAudit(job) {
 
     // 1. Fetch ALL Properties
     await supabase.from('audit_jobs').update({ progress_message: 'Fetching all properties...' }).eq('job_id', job_id);
-    const propertiesUrl = `https.api.hubapi.com/crm/v3/properties/${object_type}?archived=false&limit=100`;
+    // *** URL FIX 1 ***
+    const propertiesUrl = `https://api.hubapi.com/crm/v3/properties/${object_type}?archived=false&limit=100`;
     const allProperties = await fetchAllHubSpotData(propertiesUrl, accessToken, 'results');
     console.log(`[Worker] Job ${job_id}: Fetched ${allProperties.length} properties.`);
     
@@ -155,8 +156,8 @@ async function performCrmAudit(job) {
     console.log(`[Worker] Job ${job_id}: Requesting HubSpot export for ${object_type}...`);
     await supabase.from('audit_jobs').update({ progress_message: 'Requesting HubSpot export...' }).eq('job_id', job_id);
     
-    // *** FIX 1: Corrected Endpoint to start the export ***
-    const exportRequestUrl = 'https.api.hubapi.com/crm/v3/exports/export/async';
+    // *** URL FIX 2 ***
+    const exportRequestUrl = 'https://api.hubapi.com/crm/v3/exports/export/async';
     const exportRequestBody = {
         objectType: object_type,
         properties: uniquePropertyNames, 
@@ -184,8 +185,8 @@ async function performCrmAudit(job) {
     let exportStatus = 'PENDING';
     let fileUrl = null;
     
-    // *** FIX 2: Corrected Endpoint to check the export status ***
-    const exportStatusUrl = `https.api.hubapi.com/crm/v3/exports/export/async/tasks/${exportId}/status`;
+    // *** URL FIX 3 ***
+    const exportStatusUrl = `https://api.hubapi.com/crm/v3/exports/export/async/tasks/${exportId}/status`;
     let pollCount = 0;
 
     while (exportStatus === 'PENDING' || exportStatus === 'PROCESSING') {
@@ -213,7 +214,7 @@ async function performCrmAudit(job) {
     console.log(`[Worker] Job ${job_id}: Export complete. Downloading file...`);
     await supabase.from('audit_jobs').update({ progress_message: 'Downloading and processing export...' }).eq('job_id', job_id);
 
-    const fileResponse = await fetch(fileUrl);
+    const fileResponse = await fetch(fileUrl); // fileUrl is from HubSpot, it's absolute
     if (!fileResponse.ok) {
         throw new Error(`[Worker] Failed to download export file: ${fileResponse.statusText}`);
     }
@@ -322,7 +323,8 @@ async function performWorkflowAudit(job) {
     // 1. Fetch all workflow summaries using the V3 endpoint
     await supabase.from('audit_jobs').update({ progress_message: 'Fetching workflow list (V3)...' }).eq('job_id', job_id);
     
-    const workflowsUrl = 'https.api.hubapi.com/automation/v3/workflows?limit=100';
+    // *** URL FIX 4 ***
+    const workflowsUrl = 'https://api.hubapi.com/automation/v3/workflows?limit=100';
     const allWorkflows = await fetchAllHubSpotData(workflowsUrl, accessToken, 'workflows');
     
     console.log(`[Worker] Job ${job_id}: Found ${allWorkflows.length} workflow summaries from V3.`);
@@ -478,14 +480,13 @@ async function pollForJobs() {
                 })
                 .eq('job_id', job.job_id);
             
-            console.log(`[Worker] Job ${job.job_id} completed successfully.`);
+            console.log(`[Worker] Job ${job_id} completed successfully.`);
 
         } catch (auditError) {
             // 5. Mark job as 'failed' if an error occurs
-            console.error(`[Worker] Job ${job.job_id} FAILED:`, auditError.message, auditError.stack);
+            console.error(`[Worker] Job ${job_id} FAILED:`, auditError.message, auditError.stack);
             
-            // *** FIX 3: Corrected Error Handler ***
-            // Use job.job_id, not job_id
+            // This also includes the fix for the 'job_id is not defined' error
             await supabase
                 .from('audit_jobs')
                 .update({ 
@@ -507,7 +508,7 @@ async function pollForJobs() {
                 await supabase
                     .from('audit_jobs')
                     .update({ status: 'failed', error_message: 'Worker fatal error: ' + err.message })
-                    .eq('job_id', job.job_id); // This one was already correct
+                    .eq('job_id', job.job_id);
             } catch (releaseError) {
                 console.error(`[Worker] CRITICAL: Failed to release job ${job.job_id} after fatal error.`, releaseError.message);
             }
