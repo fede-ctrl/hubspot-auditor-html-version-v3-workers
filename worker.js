@@ -126,7 +126,7 @@ async function fetchAllHubSpotData(initialUrl, accessToken, resultsKey) {
 // ---------------------------------
 
 /**
- * Performs the full CRM audit (Contacts/Companies) using the 'POST /crm/v3/exports' API.
+ * Performs the full CRM audit (Contacts/Companies) using the 'POST /crm/v3/exports/export/async' API.
  */
 async function performCrmAudit(job) {
     const { portal_id, object_type, job_id } = job;
@@ -158,9 +158,8 @@ async function performCrmAudit(job) {
     console.log(`[Worker] Job ${job_id}: Requesting HubSpot export for ${object_type}...`);
     await supabase.from('audit_jobs').update({ progress_message: 'Requesting HubSpot export...' }).eq('job_id', job_id);
     
-    // *** THIS IS THE FIX ***
-    // The endpoint is /crm/v3/exports, not /crm/v3/exports/create
-    const exportRequestUrl = 'https://api.hubapi.com/crm/v3/exports';
+    // *** FIX 1: Corrected Endpoint to start the export ***
+    const exportRequestUrl = 'https://api.hubapi.com/crm/v3/exports/export/async';
     const exportRequestBody = {
         objectType: object_type,
         properties: uniquePropertyNames, // Ask for all properties
@@ -187,7 +186,9 @@ async function performCrmAudit(job) {
     // 2. Poll HubSpot for the export file URL
     let exportStatus = 'PENDING';
     let fileUrl = null;
-    const exportStatusUrl = `https://api.hubapi.com/crm/v3/exports/${exportId}/status`;
+    
+    // *** FIX 2: Corrected Endpoint to check the export status ***
+    const exportStatusUrl = `https://api.hubapi.com/crm/v3/exports/export/async/tasks/${exportId}/status`;
     let pollCount = 0;
 
     while (exportStatus === 'PENDING' || exportStatus === 'PROCESSING') {
@@ -489,11 +490,11 @@ async function pollForJobs() {
                 })
                 .eq('job_id', job.job_id);
             
-            console.log(`[Worker] Job ${job.job_id} completed successfully.`);
+            console.log(`[Worker] Job ${job_id} completed successfully.`);
 
         } catch (auditError) {
             // 5. Mark job as 'failed' if an error occurs
-            console.error(`[Worker] Job ${job.job_id} FAILED:`, auditError.message, auditError.stack);
+            console.error(`[Worker] Job ${job_id} FAILED:`, auditError.message, auditError.stack);
             await supabase
                 .from('audit_jobs')
                 .update({ 
