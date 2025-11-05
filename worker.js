@@ -12,6 +12,9 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 const CLIENT_ID = process.env.HUBSPOT_CLIENT_ID;
 const CLIENT_SECRET = process.env.HUBSPOT_CLIENT_SECRET;
 
+// *** NEW: Define the API base URL ***
+const HUBSPOT_API_BASE = 'https://api.eu1.hubapi.com';
+
 // --- Helper: Rate Limit Delay ---
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -34,8 +37,10 @@ async function getValidAccessToken(portalId) {
     let { refresh_token, access_token, expires_at } = installation;
 
     if (new Date() > new Date(expires_at)) {
-        console.log(`[Worker] Refreshing token for portal ${portalId}`);
-        const response = await fetch('https://api.hubapi.com/oauth/v1/token', { // Checked: Correct URL
+        console.log(`[Worker] Refreshing token for portal ${portalId} (EU)`);
+        
+        // *** FIX: Use EU1 domain for token refresh ***
+        const response = await fetch(`${HUBSPOT_API_BASE}/oauth/v1/token`, { 
             method: 'POST', 
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, 
             body: new URLSearchParams({ 
@@ -135,8 +140,9 @@ async function performCrmAudit(job) {
 
     // 1. Fetch ALL Properties
     await supabase.from('audit_jobs').update({ progress_message: 'Fetching all properties...' }).eq('job_id', job_id);
-    // *** URL FIX 1 (Added https://) ***
-    const propertiesUrl = `https://api.hubapi.com/crm/v3/properties/${object_type}?archived=false&limit=100`;
+    
+    // *** FIX: Use EU1 domain ***
+    const propertiesUrl = `${HUBSPOT_API_BASE}/crm/v3/properties/${object_type}?archived=false&limit=100`;
     const allProperties = await fetchAllHubSpotData(propertiesUrl, accessToken, 'results');
     console.log(`[Worker] Job ${job_id}: Fetched ${allProperties.length} properties.`);
     
@@ -156,8 +162,8 @@ async function performCrmAudit(job) {
     console.log(`[Worker] Job ${job_id}: Requesting HubSpot export for ${object_type}...`);
     await supabase.from('audit_jobs').update({ progress_message: 'Requesting HubSpot export...' }).eq('job_id', job_id);
     
-    // *** URL FIX 2 (Added https://) ***
-    const exportRequestUrl = 'https://api.hubapi.com/crm/v3/exports/export/async';
+    // *** FIX: Use EU1 domain ***
+    const exportRequestUrl = `${HUBSPOT_API_BASE}/crm/v3/exports/export/async`;
     const exportRequestBody = {
         objectType: object_type,
         properties: uniquePropertyNames, 
@@ -185,8 +191,8 @@ async function performCrmAudit(job) {
     let exportStatus = 'PENDING';
     let fileUrl = null;
     
-    // *** URL FIX 3 (Added https://) ***
-    const exportStatusUrl = `https://api.hubapi.com/crm/v3/exports/export/async/tasks/${exportId}/status`;
+    // *** FIX: Use EU1 domain ***
+    const exportStatusUrl = `${HUBSPOT_API_BASE}/crm/v3/exports/export/async/tasks/${exportId}/status`;
     let pollCount = 0;
 
     while (exportStatus === 'PENDING' || exportStatus === 'PROCESSING') {
@@ -214,7 +220,7 @@ async function performCrmAudit(job) {
     console.log(`[Worker] Job ${job_id}: Export complete. Downloading file...`);
     await supabase.from('audit_jobs').update({ progress_message: 'Downloading and processing export...' }).eq('job_id', job_id);
 
-    const fileResponse = await fetch(fileUrl); // fileUrl is from HubSpot, it's absolute
+    const fileResponse = await fetch(fileUrl); // This URL is absolute from HubSpot
     if (!fileResponse.ok) {
         throw new Error(`[Worker] Failed to download export file: ${fileResponse.statusText}`);
     }
@@ -234,7 +240,7 @@ async function performCrmAudit(job) {
         totalRecords = records.length;
         console.log(`[Worker] Job ${job_id}: Parsed ${totalRecords} records from export file.`);
         
-        // 4. Process all rows from the parsed CSV
+        // 4. Process all rows
         for (const record of records) {
             const recordId = record['Record ID'];
             
@@ -320,11 +326,11 @@ async function performWorkflowAudit(job) {
     await supabase.from('audit_jobs').update({ progress_message: 'Fetching access token...' }).eq('job_id', job_id);
     const accessToken = await getValidAccessToken(portal_id);
 
-    // 1. Fetch all workflow summaries using the V3 endpoint
+    // 1. Fetch all workflow summaries
     await supabase.from('audit_jobs').update({ progress_message: 'Fetching workflow list (V3)...' }).eq('job_id', job_id);
     
-    // *** URL FIX 4 (Added https://) ***
-    const workflowsUrl = 'https://api.hubapi.com/automation/v3/workflows?limit=100';
+    // *** FIX: Use EU1 domain ***
+    const workflowsUrl = `${HUBSPOT_API_BASE}/automation/v3/workflows?limit=100`;
     const allWorkflows = await fetchAllHubSpotData(workflowsUrl, accessToken, 'workflows');
     
     console.log(`[Worker] Job ${job_id}: Found ${allWorkflows.length} workflow summaries from V3.`);
@@ -458,7 +464,7 @@ async function pollForJobs() {
         }
 
         // 3. Now that we've claimed it, execute the job
-        console.log(`[Worker] Job ${job.job_id} claimed for portal ${job.portal_id}. Starting audit...`);
+        console.log(`[Worker] Job ${job_id} claimed for portal ${job.portal_id}. Starting audit...`);
         let auditResults = {};
         try {
             // Run the audit based on type
@@ -484,10 +490,9 @@ async function pollForJobs() {
 
         } catch (auditError) {
             // 5. Mark job as 'failed' if an error occurs
-            console.error(`[Worker] Job ${job.job_id} FAILED:`, auditError.message, auditError.stack);
+            console.error(`[Worker] Job ${job_id} FAILED:`, auditError.message, auditError.stack);
             
-            // *** VARIABLE FIX (job.job_id) ***
-            // This stops the 'job_id is not defined' crash
+            // This also includes the fix for the 'job_id is not defined' error
             await supabase
                 .from('audit_jobs')
                 .update({ 
@@ -495,7 +500,7 @@ async function pollForJobs() {
                     error_message: auditError.message.substring(0, 500), 
                     progress_message: 'Audit failed.' 
                 })
-                .eq('job_id', job.job_id); // Use job.job_id, NOT job_id
+                .eq('job_id', job.job_id); // Use job.job_id
         }
         
         // Immediately poll for the next job
