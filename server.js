@@ -20,8 +20,6 @@ app.use(express.static(path.join(__dirname, 'public')));
 // --- Environment Variables ---
 const CLIENT_ID = process.env.HUBSPOT_CLIENT_ID;
 const CLIENT_SECRET = process.env.HUBSPOT_CLIENT_SECRET;
-// This variable MUST be set in your Render Web Service environment settings
-// e.g., RENDER_EXTERNAL_URL = https://auditpulsepro-web.onrender.com
 const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL; 
 const REDIRECT_URI = `${RENDER_EXTERNAL_URL}/api/oauth-callback`;
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -29,14 +27,30 @@ const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
+// *** NEW: Define the API base URL ***
+// This is critical for supporting EU portals
+const HUBSPOT_API_BASE = 'https://api.eu1.hubapi.com';
+
 // --- Helper: Get Access Token ---
 async function getValidAccessToken(portalId) {
     const { data: installation, error } = await supabase.from('installations').select('refresh_token, access_token, expires_at').eq('hubspot_portal_id', portalId).single();
     if (error || !installation) throw new Error(`Could not find installation for portal ${portalId}. Please reinstall the app.`);
     let { refresh_token, access_token, expires_at } = installation;
     if (new Date() > new Date(expires_at)) {
-        console.log(`Refreshing token for portal ${portalId}`);
-        const response = await fetch('https://api.hubapi.com/oauth/v1/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'refresh_token', client_id: CLIENT_ID, client_secret: CLIENT_SECRET, refresh_token }), });
+        console.log(`Refreshing token for portal ${portalId} (EU)`);
+        
+        // *** FIX: Use EU1 domain for token refresh ***
+        const response = await fetch(`${HUBSPOT_API_BASE}/oauth/v1/token`, { 
+            method: 'POST', 
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, 
+            body: new URLSearchParams({ 
+                grant_type: 'refresh_token', 
+                client_id: CLIENT_ID, 
+                client_secret: CLIENT_SECRET, 
+                refresh_token 
+            }), 
+        });
+
         if (!response.ok) throw new Error('Failed to refresh access token');
         const newTokens = await response.json();
         access_token = newTokens.access_token;
@@ -56,15 +70,16 @@ app.get('/api/install', (req, res) => {
     }
     console.log("Redirect URI:", REDIRECT_URI);
     
-    // *** THIS IS THE FIX ***
-    // Added 'crm.export' to the required scopes list
-    const REQUIRED_SCOPES = 'oauth crm.objects.companies.read crm.schemas.contacts.read crm.objects.contacts.read crm.schemas.companies.read crm.export';
+    // *** FIX: Added 'crm.export' to the required scopes list ***
+    // Using the scopes from your URL + the one we need
+    const REQUIRED_SCOPES = 'oauth crm.objects.companies.read crm.schemas.contacts.read crm.objects.contacts.read crm.schemas.custom.read tickets automation crm.export';
     
-    const OPTIONAL_SCOPES = 'tickets crm.schemas.deals.read automation business-intelligence crm.objects.owners.read crm.objects.deals.read';
+    const OPTIONAL_SCOPES = 'cms.knowledge_base.settings.read crm.objects.deals.read';
     
-    const authUrl = `https://app.hubspot.com/oauth/authorize?client_id=${CLIENT_ID}&redirect_uri=${REDIRECT_URI}&scope=${REQUIRED_SCOPES}&optional_scope=${OPTIONAL_SCOPES}`;
+    // *** FIX: Use EU1 domain for authorization ***
+    const authUrl = `https://app-eu1.hubspot.com/oauth/authorize?client_id=${CLIENT_ID}&redirect_uri=${REDIRECT_URI}&scope=${REQUIRED_SCOPES.replace(/ /g, '%20')}&optional_scope=${OPTIONAL_SCOPES.replace(/ /g, '%20')}`;
     
-    console.log("Generated Auth URL:", authUrl); // Log the URL we are building
+    console.log("Generated Auth URL:", authUrl); 
     res.redirect(authUrl);
 });
 
@@ -88,12 +103,25 @@ app.get('/api/oauth-callback', async (req, res) => {
          return res.status(500).send("<h1>Configuration Error</h1><p>The server is missing the RENDER_EXTERNAL_URL environment variable. Cannot complete authentication.</p>");
     }
     try {
-        const response = await fetch('https://api.hubapi.com/oauth/v1/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'authorization_code', client_id: CLIENT_ID, client_secret: CLIENT_SECRET, redirect_uri: REDIRECT_URI, code: authCode }), });
+        // *** FIX: Use EU1 domain for token exchange ***
+        const response = await fetch(`${HUBSPOT_API_BASE}/oauth/v1/token`, { 
+            method: 'POST', 
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, 
+            body: new URLSearchParams({ 
+                grant_type: 'authorization_code', 
+                client_id: CLIENT_ID, 
+                client_secret: CLIENT_SECRET, 
+                redirect_uri: REDIRECT_URI, 
+                code: authCode 
+            }), 
+        });
+
         if (!response.ok) throw new Error(await response.text());
         const tokenData = await response.json();
         const { refresh_token, access_token, expires_in } = tokenData;
 
-        const tokenInfoResponse = await fetch(`https://api.hubapi.com/oauth/v1/access-tokens/${access_token}`);
+        // *** FIX: Use EU1 domain for token info ***
+        const tokenInfoResponse = await fetch(`${HUBSPOT_API_BASE}/oauth/v1/access-tokens/${access_token}`);
         if (!tokenInfoResponse.ok) throw new Error('Failed to fetch HubSpot token info');
         const tokenInfo = await tokenInfoResponse.json();
 
@@ -112,8 +140,9 @@ app.get('/api/oauth-callback', async (req, res) => {
     }
 });
 
-// 2. Scope Check
+// 2. Scope Check (No API calls, no change needed)
 app.get('/api/check-scopes', async (req, res) => {
+    // ... (no changes needed in this function)
     const portalId = req.header('X-HubSpot-Portal-Id');
     if (!portalId) return res.status(400).json({ message: 'HubSpot Portal ID is missing.' });
     try {
@@ -123,7 +152,6 @@ app.get('/api/check-scopes', async (req, res) => {
             return res.status(500).json({ message: 'Could not fetch permissions.' });
         }
         if (!data || !data.granted_scopes) return res.json([]);
-
         let scopesArray;
         if (typeof data.granted_scopes === 'string') {
             try { scopesArray = JSON.parse(data.granted_scopes); } catch (e) { return res.json([]); }
@@ -140,16 +168,14 @@ app.get('/api/check-scopes', async (req, res) => {
 });
 
 
-// 3. *** NEW: Create Audit Job ***
+// 3. Create Audit Job (No API calls, no change needed)
 app.post('/api/create-audit-job', async (req, res) => {
+    // ... (no changes needed in this function)
     const portalId = req.header('X-HubSpot-Portal-Id');
-    const { objectType } = req.body; // 'contacts', 'companies', 'workflows'
-
+    const { objectType } = req.body; 
     if (!portalId) return res.status(400).json({ message: 'HubSpot Portal ID is missing.' });
     if (!objectType) return res.status(400).json({ message: 'objectType is missing.' });
-
     try {
-        // 1. Check for an existing recent job for this object to prevent spam
         const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
         const { data: existingJob, error: existingError } = await supabase
             .from('audit_jobs')
@@ -158,7 +184,7 @@ app.post('/api/create-audit-job', async (req, res) => {
             .eq('object_type', objectType)
             .in('status', ['pending', 'running'])
             .gt('created_at', tenMinutesAgo)
-            .maybeSingle(); // Use maybeSingle to avoid error if no rows found
+            .maybeSingle(); 
         
         if (existingJob) {
             console.log(`Job ${existingJob.job_id} is already ${existingJob.status}. Returning existing job.`);
@@ -170,8 +196,6 @@ app.post('/api/create-audit-job', async (req, res) => {
         if (existingError) {
             throw existingError;
         }
-
-        // 2. Create a new job
         const { data: newJob, error: createError } = await supabase
             .from('audit_jobs')
             .insert({
@@ -180,19 +204,14 @@ app.post('/api/create-audit-job', async (req, res) => {
                 status: 'pending',
                 progress_message: 'Job submitted to queue...'
             })
-            .select('job_id') // Return the new job ID
+            .select('job_id') 
             .single();
-
         if (createError) throw createError;
-        
         console.log(`Created new job ${newJob.job_id} for portal ${portalId}, type ${objectType}`);
-        
-        // 3. Respond immediately with the job ID
         res.status(202).json({ 
             message: "Audit job created successfully.",
             jobId: newJob.job_id 
         });
-
     } catch (error) {
         console.error('Error creating audit job:', error.message);
         res.status(500).json({ message: `Error creating audit job: ${error.message}` });
@@ -200,40 +219,35 @@ app.post('/api/create-audit-job', async (req, res) => {
 });
 
 
-// 4. *** NEW: Check Audit Job Status ***
+// 4. Check Audit Job Status (No API calls, no change needed)
 app.get('/api/audit-status/:jobId', async (req, res) => {
+    // ... (no changes needed in this function)
     const { jobId } = req.params;
     if (!jobId) return res.status(400).json({ message: 'Job ID is missing.' });
-
     try {
         const { data: job, error } = await supabase
             .from('audit_jobs')
             .select('status, progress_message, results, error_message')
             .eq('job_id', jobId)
             .single();
-
         if (error) throw error;
-        
         if (!job) {
             return res.status(404).json({ message: 'Job not found.' });
         }
-
-        // Only send back the large 'results' payload if the job is complete
         if (job.status === 'complete') {
             res.status(200).json({
                 status: job.status,
                 progress_message: job.progress_message,
-                results: job.results // This contains the full audit data
+                results: job.results 
             });
         } else {
-             res.status(200).json({ // Send status update without the large payload
+             res.status(200).json({ 
                 status: job.status,
                 progress_message: job.progress_message,
                 error_message: job.error_message,
                 results: null
             });
         }
-
     } catch (error) {
         console.error('Error fetching job status:', error.message);
         res.status(500).json({ message: `Error fetching job status: ${error.message}` });
@@ -241,27 +255,23 @@ app.get('/api/audit-status/:jobId', async (req, res) => {
 });
 
 
-// 5. Excel Download (Unchanged logic)
+// 5. Excel Download (No API calls, no change needed)
 app.post('/api/download-excel', async (req, res) => {
+    // ... (no changes needed in this function)
     const { auditData, auditType, objectType } = req.body; 
-
     if (!auditData || !auditType) {
         return res.status(400).send('Audit data or type is missing.');
     }
-    
     try {
         const workbook = new ExcelJS.Workbook();
         workbook.creator = 'AuditPulse';
         workbook.created = new Date();
         const timestamp = new Date().toISOString().split('T')[0];
         let fileName = `AuditPulse-Report-${auditType}-${timestamp}.xlsx`;
-
         if (auditType === 'crm') {
             if (!objectType || !auditData.data) return res.status(400).send('CRM Audit data (objectType or data block) is invalid.');
             fileName = `AuditPulse-Report-${objectType}-${timestamp}.xlsx`;
             const crmData = auditData.data;
-
-            // Worksheet 1: Property Audit
             const propSheet = workbook.addWorksheet('Property Audit');
             propSheet.columns = [
                 { header: 'Property Label', key: 'label', width: 30 }, { header: 'Internal Name', key: 'internalName', width: 30 }, { header: 'Type', key: 'type', width: 15 }, { header: 'Source', key: 'source', width: 15 }, { header: 'Description', key: 'description', width: 40 }, { header: 'Filled Records', key: 'fillCount', width: 15 }, { header: 'Fill Rate (%)', key: 'fillRate', width: 15 }
@@ -271,8 +281,6 @@ app.post('/api/download-excel', async (req, res) => {
                     propSheet.addRow({ ...p, source: p.isCustom ? 'Custom' : 'Standard' });
                 });
             }
-
-            // Worksheet 2: Orphaned/Empty Records
             const orphanLabel = objectType === 'contacts' ? 'Orphaned Contacts' : 'Empty Companies';
             const orphanSheet = workbook.addWorksheet(orphanLabel);
             if (crmData.orphanedRecords && Array.isArray(crmData.orphanedRecords)) {
@@ -288,8 +296,6 @@ app.post('/api/download-excel', async (req, res) => {
                     });
                 }
             }
-
-            // Worksheet 3: Duplicates
             const duplicateSheet = workbook.addWorksheet('Duplicates');
             if (crmData.duplicateRecords && Array.isArray(crmData.duplicateRecords)) {
                  if (objectType === 'contacts') {
@@ -304,8 +310,6 @@ app.post('/api/download-excel', async (req, res) => {
                     });
                 }
             }
-
-            // Worksheet 4: Properties Missing Description
             const missingDescSheet = workbook.addWorksheet('Properties Missing Description');
             missingDescSheet.columns = [ { header: 'Property Label', key: 'label', width: 30 }, { header: 'Internal Name', key: 'internalName', width: 30 }, { header: 'Type', key: 'type', width: 20 } ];
             if (crmData.properties && Array.isArray(crmData.properties)) {
@@ -313,25 +317,21 @@ app.post('/api/download-excel', async (req, res) => {
                     missingDescSheet.addRow({label: p.label, internalName: p.internalName, type: p.type});
                 });
             }
-
         } else if (auditType === 'workflows') {
             if (!auditData.results || !Array.isArray(auditData.results)) {
                  return res.status(400).send('Workflow Audit data (results array) is invalid or missing.');
             }
             fileName = `AuditPulse-Report-Workflows-${timestamp}.xlsx`;
-
             const wfSheet = workbook.addWorksheet('Workflow Audit');
             wfSheet.columns = [
                 { header: 'Workflow Name', key: 'workflow_name', width: 35 }, { header: 'Workflow ID', key: 'workflow_id', width: 15 }, { header: 'Action Type', key: 'action_type', width: 20 }, { header: 'Finding', key: 'finding', width: 30 }, { header: 'Details', key: 'details', width: 40 }, { header: 'Last Updated', key: 'last_updated', width: 20 }
             ];
-
             auditData.results.forEach(finding => {
                 wfSheet.addRow({
                     workflow_name: finding.workflow_name || 'N/A', workflow_id: finding.workflow_id || 'N/A', action_type: finding.action_type || 'N/A', finding: finding.finding || 'N/A', details: finding.details || 'N/A', last_updated: finding.last_updated || 'N/A'
                  });
             });
         }
-
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
         res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
         await workbook.xlsx.write(res);
