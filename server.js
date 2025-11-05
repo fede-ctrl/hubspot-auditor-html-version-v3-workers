@@ -1,6 +1,5 @@
 // This script runs on the 'auditpulsepro-web' service.
 // It handles web requests, creates jobs, and reports status.
-// FIX: Re-ordered OPTIONAL_SCOPES to exactly match the app's configuration.
 
 require('dotenv').config();
 const express = require('express');
@@ -57,10 +56,10 @@ app.get('/api/install', (req, res) => {
     }
     console.log("Redirect URI:", REDIRECT_URI);
     
-    const REQUIRED_SCOPES = 'oauth crm.objects.companies.read crm.schemas.contacts.read crm.objects.contacts.read crm.schemas.companies.read';
-    
     // *** THIS IS THE FIX ***
-    // Re-ordered to exactly match your working install URL's optional_scope parameter.
+    // Added 'crm.export' to the required scopes list
+    const REQUIRED_SCOPES = 'oauth crm.objects.companies.read crm.schemas.contacts.read crm.objects.contacts.read crm.schemas.companies.read crm.export';
+    
     const OPTIONAL_SCOPES = 'tickets crm.schemas.deals.read automation business-intelligence crm.objects.owners.read crm.objects.deals.read';
     
     const authUrl = `https://app.hubspot.com/oauth/authorize?client_id=${CLIENT_ID}&redirect_uri=${REDIRECT_URI}&scope=${REQUIRED_SCOPES}&optional_scope=${OPTIONAL_SCOPES}`;
