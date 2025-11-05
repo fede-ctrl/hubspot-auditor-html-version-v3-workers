@@ -62,7 +62,6 @@ async function getValidAccessToken(portalId) {
 
 /**
  * Fetches *all pages* of data from a HubSpot endpoint using GET.
- * This is now used for Properties and the V4 Workflow list.
  */
 async function fetchAllHubSpotData(initialUrl, accessToken, resultsKey) {
     const allResults = [];
@@ -127,9 +126,7 @@ async function fetchAllHubSpotData(initialUrl, accessToken, resultsKey) {
 // ---------------------------------
 
 /**
- * *** THIS IS THE REAL CRM AUDIT FIX ***
  * Performs the full CRM audit (Contacts/Companies) using the 'POST /crm/v3/exports' API.
- * This has NO 10,000 record limit and avoids 414 errors.
  */
 async function performCrmAudit(job) {
     const { portal_id, object_type, job_id } = job;
@@ -138,13 +135,12 @@ async function performCrmAudit(job) {
     await supabase.from('audit_jobs').update({ progress_message: 'Fetching access token...' }).eq('job_id', job_id);
     const accessToken = await getValidAccessToken(portal_id);
 
-    // 1. Fetch ALL Properties (This is unchanged and fine)
+    // 1. Fetch ALL Properties
     await supabase.from('audit_jobs').update({ progress_message: 'Fetching all properties...' }).eq('job_id', job_id);
     const propertiesUrl = `https://api.hubapi.com/crm/v3/properties/${object_type}?archived=false&limit=100`;
     const allProperties = await fetchAllHubSpotData(propertiesUrl, accessToken, 'results');
     console.log(`[Worker] Job ${job_id}: Fetched ${allProperties.length} properties.`);
     
-    // We still need the property names to initialize the fillCounts object
     const baseProps = object_type === 'contacts' ? ['associatedcompanyid', 'email'] : ['num_associated_contacts', 'domain'];
     const propertyNames = allProperties.map(p => p.name).concat(baseProps);
     const uniquePropertyNames = [...new Set(propertyNames)];
@@ -157,7 +153,6 @@ async function performCrmAudit(job) {
     const orphanedRecords = [];
     const seenDuplicateValues = new Map();
     const duplicateIdProp = object_type === 'contacts' ? 'email' : 'domain';
-    let limitHit = false; // This is no longer relevant, but we keep the structure
 
     // 1. Request the Export from HubSpot
     console.log(`[Worker] Job ${job_id}: Requesting HubSpot export for ${object_type}...`);
@@ -229,12 +224,9 @@ async function performCrmAudit(job) {
     const rows = csvText.split('\n');
     
     if (rows.length <= 1) {
-         // This can happen on an empty portal, not an error
          console.log(`[Worker] Job ${job_id}: Export file was empty (or contained header only).`);
          totalRecords = 0;
     } else {
-        // Parse the CSV
-        // We use 'csv-parse/sync' for simplicity in the worker
         const records = parse(csvText, {
             columns: true,
             skip_empty_lines: true
@@ -249,14 +241,13 @@ async function performCrmAudit(job) {
             
             // A. Calculate Fill Counts
             for (const propName of uniquePropertyNames) {
-                // Check if the property exists and has a value
                 if (record[propName] !== null && record[propName] !== '' && record[propName] !== undefined) {
                     fillCounts[propName]++;
                 }
             }
 
             // B. Check Orphans
-            if (object_type === 'contacts' && !record.associatedcompanyid) { // Use the direct property name from CSV
+            if (object_type === 'contacts' && !record.associatedcompanyid) {
                 if (orphanedRecords.length < 5000) orphanedRecords.push({ id: recordId, properties: record });
             } else if (object_type === 'companies') {
                 const numContacts = record.num_associated_contacts;
@@ -324,43 +315,39 @@ async function performCrmAudit(job) {
 }
 
 /**
- * **WORKFLOW AUDIT - V4 FIX**
- * 1. Calls V4 'GET /automation/v4/workflows' to get the *complete list* of all workflows
- * and their actions.
+ * **WORKFLOW AUDIT - V3** (V4 was 404-ing in previous logs)
  */
 async function performWorkflowAudit(job) {
     const { portal_id, job_id } = job;
-    console.log(`[Worker] Job ${job_id}: Starting Workflow Audit (using V4 endpoint)...`);
+    console.log(`[Worker] Job ${job_id}: Starting Workflow Audit (using V3 endpoint)...`);
 
     await supabase.from('audit_jobs').update({ progress_message: 'Fetching access token...' }).eq('job_id', job_id);
     const accessToken = await getValidAccessToken(portal_id);
 
-    // 1. Fetch all workflow summaries using the V4 endpoint
-    await supabase.from('audit_jobs').update({ progress_message: 'Fetching workflow list (V4)...' }).eq('job_id', job_id);
+    // 1. Fetch all workflow summaries using the V3 endpoint
+    await supabase.from('audit_jobs').update({ progress_message: 'Fetching workflow list (V3)...' }).eq('job_id', job_id);
     
-    // **THE V4 FIX**
-    // This is the correct, verified endpoint for listing workflows.
-    // It returns 'results' and 'paging'
-    const workflowsUrl = 'https://api.hubapi.com/automation/v4/workflows?limit=100';
-    const allWorkflows = await fetchAllHubSpotData(workflowsUrl, accessToken, 'results');
+    // Use V3 endpoint, as V4 was failing in previous logs
+    const workflowsUrl = 'https://api.hubapi.com/automation/v3/workflows?limit=100';
+    // Use 'workflows' as the results key for V3
+    const allWorkflows = await fetchAllHubSpotData(workflowsUrl, accessToken, 'workflows');
     
-    console.log(`[Worker] Job ${job_id}: Found ${allWorkflows.length} workflow summaries from V4.`);
+    console.log(`[Worker] Job ${job_id}: Found ${allWorkflows.length} workflow summaries from V3.`);
 
-    // *** NEW: Calculate KPIs from V4 data ***
+    // *** Calculate KPIs from V3 data ***
     let kpis = {
         totalWorkflows: 0,
         inactiveWorkflows: 0,
         noEnrollmentWorkflows: 0,
-        isIncomplete: false // This should now be complete
+        isIncomplete: false
     };
     if (allWorkflows && allWorkflows.length > 0) {
         kpis.totalWorkflows = allWorkflows.length;
         kpis.inactiveWorkflows = allWorkflows.filter(wf => wf.enabled === false).length;
-        kpis.noEnrollmentWorkflows = allWorkflows.filter(wf => wf.activeContactCount === 0).length;
+        // V3 uses 'contactCount'
+        kpis.noEnrollmentWorkflows = allWorkflows.filter(wf => wf.contactCount === 0).length;
     }
     console.log(`[Worker] Job ${job_id}: Calculated KPIs:`, kpis);
-    // *** END KPI Calculation ***
-
 
     const findings = [];
     const v1EmailPattern = /marketing-emails[\/|\\]v1[\/|\\]emails/i;
@@ -368,16 +355,11 @@ async function performWorkflowAudit(job) {
     let processedCount = 0;
 
     // 2. Loop and deep scan each workflow
-    // The V4 'GET /automation/v4/workflows' returns the *full* definition,
-    // including the 'actions' array. No second API call is needed. This is much faster.
-    console.log(`[Worker] Job ${job_id}: V4 endpoint returned full definitions. Starting direct scan...`);
+    console.log(`[Worker] Job ${job_id}: V3 endpoint returned full definitions. Starting direct scan...`);
     
     for (const workflowDetail of allWorkflows) {
         processedCount++;
         
-        // No sleep() needed, we are iterating an in-memory array.
-        // The delays already happened in fetchAllHubSpotData.
-
         if (processedCount % 20 === 0) { // Update progress every 20 workflows
             const progressMessage = `Scanning workflow ${processedCount}/${allWorkflows.length}...`;
             console.log(`[Worker] Job ${job_id}: ${progressMessage}`);
@@ -391,9 +373,6 @@ async function performWorkflowAudit(job) {
             for (const action of workflowDetail.actions) {
                 let foundIssue = null;
                 let details = '';
-
-                // The V4 action structure might be different.
-                // We'll check for 'type' and 'url'/'code' properties.
                 
                 if (action.type === 'WEBHOOK' && action.url) {
                     if (hapikeyPattern.test(action.url)) {
@@ -420,14 +399,13 @@ async function performWorkflowAudit(job) {
                         action_type: action.type,
                         finding: foundIssue,
                         details: details,
-                        last_updated: workflowDetail.updatedAt ? new Date(workflowDetail.updatedAt).toLocaleDateString() : 'N/A'
+                        // V3 uses 'updated'
+                        last_updated: workflowDetail.updated ? new Date(workflowDetail.updated).toLocaleDateString() : 'N/A'
                     });
                 }
             }
         } catch (err) {
             console.error(`[Worker] Job ${job_id}: Error processing workflow ${workflowDetail.id}:`, err.message);
-            // Log the action that failed, if possible
-            // console.log(`[Worker] Failing action object:`, JSON.stringify(action, null, 2));
             continue;
         }
     }
@@ -556,7 +534,6 @@ async function startWorker() {
         return;
     }
     
-    // We no longer need the complex (and broken) setupDatabaseFunction
     console.log('[Worker] AuditPulse Worker Service started. Polling for jobs...');
     pollForJobs(); // Start the polling loop
 }
