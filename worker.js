@@ -35,7 +35,7 @@ async function getValidAccessToken(portalId) {
 
     if (new Date() > new Date(expires_at)) {
         console.log(`[Worker] Refreshing token for portal ${portalId}`);
-        const response = await fetch('https://api.hubapi.com/oauth/v1/token', { 
+        const response = await fetch('https.api.hubapi.com/oauth/v1/token', { 
             method: 'POST', 
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, 
             body: new URLSearchParams({ 
@@ -67,14 +67,14 @@ async function fetchAllHubSpotData(initialUrl, accessToken, resultsKey) {
     const allResults = [];
     let currentUrl = initialUrl;
     let pageCount = 0;
-    const MAX_PAGES = 100; // Safety cap (for properties/workflow list)
+    const MAX_PAGES = 100; // Safety cap
 
     console.log(`[Worker] fetchAll: Starting fetch for key '${resultsKey}' from ${initialUrl}`);
 
     try {
         while (currentUrl && pageCount < MAX_PAGES) {
             pageCount++;
-            await sleep(200); // Add a small delay to be kind to the API
+            await sleep(200); 
             const response = await fetch(currentUrl, { headers: { 'Authorization': `Bearer ${accessToken}` } });
 
             if (!response.ok) {
@@ -84,7 +84,7 @@ async function fetchAllHubSpotData(initialUrl, accessToken, resultsKey) {
             }
 
             const data = await response.json();
-            const resultsOnPage = data[resultsKey]; // Use the dynamic key
+            const resultsOnPage = data[resultsKey]; 
 
             if (resultsOnPage && Array.isArray(resultsOnPage)) {
                 allResults.push(...resultsOnPage);
@@ -92,20 +92,18 @@ async function fetchAllHubSpotData(initialUrl, accessToken, resultsKey) {
                  console.warn(`[Worker] fetchAll: Page ${pageCount}: No iterable data found under key '${resultsKey}'.`);
             }
 
-            // Paging logic
             const hasPaging = data.paging && data.paging.next && (data.paging.next.link || data.paging.next.after);
 
             if (hasPaging) {
                 if (data.paging.next.link) {
                     currentUrl = data.paging.next.link;
                 } else if (data.paging.next.after) {
-                    // Rebuild URL, preserving any initial params
                     const baseUrl = initialUrl.split('?')[0];
-                    const searchParams = new URLSearchParams(currentUrl.split('?')[1] || ''); // Use current params
-                    searchParams.set('after', data.paging.next.after); // Set/overwrite after
+                    const searchParams = new URLSearchParams(currentUrl.split('?')[1] || ''); 
+                    searchParams.set('after', data.paging.next.after); 
                     currentUrl = `${baseUrl}?${searchParams.toString()}`;
                 } else {
-                     currentUrl = null; // No link or after, stop
+                     currentUrl = null; 
                 }
             } else {
                 console.log(`[Worker] fetchAll: Page ${pageCount}: No paging information found. Assuming fetch complete.`);
@@ -137,7 +135,7 @@ async function performCrmAudit(job) {
 
     // 1. Fetch ALL Properties
     await supabase.from('audit_jobs').update({ progress_message: 'Fetching all properties...' }).eq('job_id', job_id);
-    const propertiesUrl = `https://api.hubapi.com/crm/v3/properties/${object_type}?archived=false&limit=100`;
+    const propertiesUrl = `https.api.hubapi.com/crm/v3/properties/${object_type}?archived=false&limit=100`;
     const allProperties = await fetchAllHubSpotData(propertiesUrl, accessToken, 'results');
     console.log(`[Worker] Job ${job_id}: Fetched ${allProperties.length} properties.`);
     
@@ -145,7 +143,6 @@ async function performCrmAudit(job) {
     const propertyNames = allProperties.map(p => p.name).concat(baseProps);
     const uniquePropertyNames = [...new Set(propertyNames)];
 
-    // --- Batch Processing Setup ---
     let totalRecords = 0;
     const fillCounts = {};
     uniquePropertyNames.forEach(propName => { fillCounts[propName] = 0; });
@@ -159,11 +156,11 @@ async function performCrmAudit(job) {
     await supabase.from('audit_jobs').update({ progress_message: 'Requesting HubSpot export...' }).eq('job_id', job_id);
     
     // *** FIX 1: Corrected Endpoint to start the export ***
-    const exportRequestUrl = 'https://api.hubapi.com/crm/v3/exports/export/async';
+    const exportRequestUrl = 'https.api.hubapi.com/crm/v3/exports/export/async';
     const exportRequestBody = {
         objectType: object_type,
-        properties: uniquePropertyNames, // Ask for all properties
-        exportFormat: "CSV" // We will parse CSV in memory
+        properties: uniquePropertyNames, 
+        exportFormat: "CSV" 
     };
 
     const exportResponse = await fetch(exportRequestUrl, {
@@ -188,12 +185,12 @@ async function performCrmAudit(job) {
     let fileUrl = null;
     
     // *** FIX 2: Corrected Endpoint to check the export status ***
-    const exportStatusUrl = `https://api.hubapi.com/crm/v3/exports/export/async/tasks/${exportId}/status`;
+    const exportStatusUrl = `https.api.hubapi.com/crm/v3/exports/export/async/tasks/${exportId}/status`;
     let pollCount = 0;
 
     while (exportStatus === 'PENDING' || exportStatus === 'PROCESSING') {
         pollCount++;
-        await sleep(5000); // Wait 5 seconds between polls
+        await sleep(5000); 
         const progressMessage = `Waiting for HubSpot export (Status: ${exportStatus}, ${pollCount * 5}s)...`;
         await supabase.from('audit_jobs').update({ progress_message }).eq('job_id', job_id);
         
@@ -240,14 +237,12 @@ async function performCrmAudit(job) {
         for (const record of records) {
             const recordId = record['Record ID'];
             
-            // A. Calculate Fill Counts
             for (const propName of uniquePropertyNames) {
                 if (record[propName] !== null && record[propName] !== '' && record[propName] !== undefined) {
                     fillCounts[propName]++;
                 }
             }
 
-            // B. Check Orphans
             if (object_type === 'contacts' && !record.associatedcompanyid) {
                 if (orphanedRecords.length < 5000) orphanedRecords.push({ id: recordId, properties: record });
             } else if (object_type === 'companies') {
@@ -257,7 +252,6 @@ async function performCrmAudit(job) {
                 }
             }
             
-            // C. Check Duplicates
             const value = record[duplicateIdProp]?.toLowerCase();
             if (value) {
                 if (!seenDuplicateValues.has(value)) {
@@ -267,8 +261,8 @@ async function performCrmAudit(job) {
                 entry.count++;
                 if (entry.records.length < 10) entry.records.push({ id: recordId, properties: record });
             }
-        } // End for...of loop
-    } // End else block
+        } 
+    } 
 
     
     console.log(`[Worker] Job ${job_id}: Processed ${totalRecords} records from export file.`);
@@ -307,7 +301,7 @@ async function performCrmAudit(job) {
             orphanedRecords: orphanedRecords,
             duplicateRecords: duplicateRecords.slice(0, 5000),
             totalDuplicates: totalDuplicates,
-            limitHit: false // We are no longer limited
+            limitHit: false 
         }
     };
     
@@ -316,7 +310,7 @@ async function performCrmAudit(job) {
 }
 
 /**
- * **WORKFLOW AUDIT - V3** (V4 was 404-ing in previous logs)
+ * **WORKFLOW AUDIT - V3**
  */
 async function performWorkflowAudit(job) {
     const { portal_id, job_id } = job;
@@ -328,14 +322,11 @@ async function performWorkflowAudit(job) {
     // 1. Fetch all workflow summaries using the V3 endpoint
     await supabase.from('audit_jobs').update({ progress_message: 'Fetching workflow list (V3)...' }).eq('job_id', job_id);
     
-    // Use V3 endpoint, as V4 was failing in previous logs
-    const workflowsUrl = 'https://api.hubapi.com/automation/v3/workflows?limit=100';
-    // Use 'workflows' as the results key for V3
+    const workflowsUrl = 'https.api.hubapi.com/automation/v3/workflows?limit=100';
     const allWorkflows = await fetchAllHubSpotData(workflowsUrl, accessToken, 'workflows');
     
     console.log(`[Worker] Job ${job_id}: Found ${allWorkflows.length} workflow summaries from V3.`);
 
-    // *** Calculate KPIs from V3 data ***
     let kpis = {
         totalWorkflows: 0,
         inactiveWorkflows: 0,
@@ -345,7 +336,6 @@ async function performWorkflowAudit(job) {
     if (allWorkflows && allWorkflows.length > 0) {
         kpis.totalWorkflows = allWorkflows.length;
         kpis.inactiveWorkflows = allWorkflows.filter(wf => wf.enabled === false).length;
-        // V3 uses 'contactCount'
         kpis.noEnrollmentWorkflows = allWorkflows.filter(wf => wf.contactCount === 0).length;
     }
     console.log(`[Worker] Job ${job_id}: Calculated KPIs:`, kpis);
@@ -355,13 +345,12 @@ async function performWorkflowAudit(job) {
     const hapikeyPattern = /hapikey=/i;
     let processedCount = 0;
 
-    // 2. Loop and deep scan each workflow
     console.log(`[Worker] Job ${job_id}: V3 endpoint returned full definitions. Starting direct scan...`);
     
     for (const workflowDetail of allWorkflows) {
         processedCount++;
         
-        if (processedCount % 20 === 0) { // Update progress every 20 workflows
+        if (processedCount % 20 === 0) { 
             const progressMessage = `Scanning workflow ${processedCount}/${allWorkflows.length}...`;
             console.log(`[Worker] Job ${job_id}: ${progressMessage}`);
             await supabase.from('audit_jobs').update({ progress_message: progressMessage }).eq('job_id', job_id);
@@ -400,7 +389,6 @@ async function performWorkflowAudit(job) {
                         action_type: action.type,
                         finding: foundIssue,
                         details: details,
-                        // V3 uses 'updated'
                         last_updated: workflowDetail.updated ? new Date(workflowDetail.updated).toLocaleDateString() : 'N/A'
                     });
                 }
@@ -415,8 +403,8 @@ async function performWorkflowAudit(job) {
     console.log(`[Worker] Job ${job_id}: Workflow Audit complete. Found ${findings.length} issues.`);
     return { 
         auditType: 'workflows', 
-        results: findings, // The table data
-        kpis: kpis // The new summary data
+        results: findings, 
+        kpis: kpis 
     };
 }
 
@@ -426,7 +414,7 @@ async function performWorkflowAudit(job) {
 // ---------------------------------
 
 /**
- * Main function to poll for pending jobs using a simple SELECT-then-UPDATE.
+ * Main function to poll for pending jobs.
  */
 async function pollForJobs() {
     let job = null;
@@ -443,12 +431,12 @@ async function pollForJobs() {
         
         if (findError) {
             console.error('[Worker] Error fetching job:', findError.message);
-            setTimeout(pollForJobs, 10000); // Wait 10s on error
+            setTimeout(pollForJobs, 10000); 
             return;
         }
         
         if (!foundJob) {
-            setTimeout(pollForJobs, 5000); // Poll again in 5 seconds
+            setTimeout(pollForJobs, 5000); 
             return;
         }
 
@@ -459,7 +447,7 @@ async function pollForJobs() {
             .from('audit_jobs')
             .update({ status: 'running', progress_message: 'Job claimed by worker...' })
             .eq('job_id', job.job_id)
-            .eq('status', 'pending'); // **CRITICAL: Only claim if it's still 'pending'**
+            .eq('status', 'pending'); 
 
         if (claimError) {
             console.error(`[Worker] Job ${job.job_id} failed to claim:`, claimError.message);
@@ -486,20 +474,23 @@ async function pollForJobs() {
                 .update({
                     status: 'complete',
                     progress_message: 'Audit complete.',
-                    results: auditResults // Store the final results
+                    results: auditResults 
                 })
                 .eq('job_id', job.job_id);
             
-            console.log(`[Worker] Job ${job_id} completed successfully.`);
+            console.log(`[Worker] Job ${job.job_id} completed successfully.`);
 
         } catch (auditError) {
             // 5. Mark job as 'failed' if an error occurs
-            console.error(`[Worker] Job ${job_id} FAILED:`, auditError.message, auditError.stack);
+            console.error(`[Worker] Job ${job.job_id} FAILED:`, auditError.message, auditError.stack);
+            
+            // *** FIX 3: Corrected Error Handler ***
+            // Use job.job_id, not job_id
             await supabase
                 .from('audit_jobs')
                 .update({ 
                     status: 'failed', 
-                    error_message: auditError.message.substring(0, 500), // Truncate error
+                    error_message: auditError.message.substring(0, 500), 
                     progress_message: 'Audit failed.' 
                 })
                 .eq('job_id', job.job_id); // Use job.job_id
@@ -509,13 +500,14 @@ async function pollForJobs() {
         setTimeout(pollForJobs, 1000); 
 
     } catch (err) {
+        // This is the outer "Fatal Error" catch block
         console.error('[Worker] Fatal Error in pollForJobs loop:', err.message);
         if (job && job.job_id) {
             try {
                 await supabase
                     .from('audit_jobs')
                     .update({ status: 'failed', error_message: 'Worker fatal error: ' + err.message })
-                    .eq('job_id', job.job_id); // Use job.job_id
+                    .eq('job_id', job.job_id); // This one was already correct
             } catch (releaseError) {
                 console.error(`[Worker] CRITICAL: Failed to release job ${job.job_id} after fatal error.`, releaseError.message);
             }
