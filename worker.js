@@ -12,7 +12,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 const CLIENT_ID = process.env.HUBSPOT_CLIENT_ID;
 const CLIENT_SECRET = process.env.HUBSPOT_CLIENT_SECRET;
 
-// *** NEW: Define the API base URL ***
+// *** FIX: Define the API base URL for EU ***
 const HUBSPOT_API_BASE = 'https://api.eu1.hubapi.com';
 
 // --- Helper: Rate Limit Delay ---
