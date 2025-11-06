@@ -12,8 +12,8 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 const CLIENT_ID = process.env.HUBSPOT_CLIENT_ID;
 const CLIENT_SECRET = process.env.HUBSPOT_CLIENT_SECRET;
 
-// *** FIX: Define the API base URL for EU ***
-const HUBSPOT_API_BASE = 'https://api.eu1.hubapi.com';
+// *** THE REAL FIX: Use the correct EU domain ***
+const HUBSPOT_API_BASE = 'https://api.hubapieu1.com';
 
 // --- Helper: Rate Limit Delay ---
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -39,7 +39,6 @@ async function getValidAccessToken(portalId) {
     if (new Date() > new Date(expires_at)) {
         console.log(`[Worker] Refreshing token for portal ${portalId} (EU)`);
         
-        // *** FIX: Use EU1 domain for token refresh ***
         const response = await fetch(`${HUBSPOT_API_BASE}/oauth/v1/token`, { 
             method: 'POST', 
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, 
@@ -141,7 +140,6 @@ async function performCrmAudit(job) {
     // 1. Fetch ALL Properties
     await supabase.from('audit_jobs').update({ progress_message: 'Fetching all properties...' }).eq('job_id', job_id);
     
-    // *** FIX: Use EU1 domain ***
     const propertiesUrl = `${HUBSPOT_API_BASE}/crm/v3/properties/${object_type}?archived=false&limit=100`;
     const allProperties = await fetchAllHubSpotData(propertiesUrl, accessToken, 'results');
     console.log(`[Worker] Job ${job_id}: Fetched ${allProperties.length} properties.`);
@@ -162,7 +160,6 @@ async function performCrmAudit(job) {
     console.log(`[Worker] Job ${job_id}: Requesting HubSpot export for ${object_type}...`);
     await supabase.from('audit_jobs').update({ progress_message: 'Requesting HubSpot export...' }).eq('job_id', job_id);
     
-    // *** FIX: Use EU1 domain ***
     const exportRequestUrl = `${HUBSPOT_API_BASE}/crm/v3/exports/export/async`;
     const exportRequestBody = {
         objectType: object_type,
@@ -191,7 +188,6 @@ async function performCrmAudit(job) {
     let exportStatus = 'PENDING';
     let fileUrl = null;
     
-    // *** FIX: Use EU1 domain ***
     const exportStatusUrl = `${HUBSPOT_API_BASE}/crm/v3/exports/export/async/tasks/${exportId}/status`;
     let pollCount = 0;
 
