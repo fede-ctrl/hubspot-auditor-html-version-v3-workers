@@ -7,7 +7,6 @@ const path = require('path');
 const ExcelJS = require('exceljs');
 
 const app = express();
-// Render sets the PORT environment variable.
 const PORT = process.env.PORT || 10000; 
 
 app.use(cors());
@@ -24,8 +23,8 @@ const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
-// *** THE REAL FIX: Use the correct EU domain ***
-const HUBSPOT_API_BASE = 'https://api.hubapieu1.com';
+// *** FIX: This is the one, global API domain for ALL accounts ***
+const HUBSPOT_API_BASE = 'https://api.hubapi.com';
 
 // --- Helper: Get Access Token ---
 async function getValidAccessToken(portalId) {
@@ -33,8 +32,9 @@ async function getValidAccessToken(portalId) {
     if (error || !installation) throw new Error(`Could not find installation for portal ${portalId}. Please reinstall the app.`);
     let { refresh_token, access_token, expires_at } = installation;
     if (new Date() > new Date(expires_at)) {
-        console.log(`Refreshing token for portal ${portalId} (EU)`);
+        console.log(`Refreshing token for portal ${portalId}`);
         
+        // *** FIX: Token refresh calls go to the global domain ***
         const response = await fetch(`${HUBSPOT_API_BASE}/oauth/v1/token`, { 
             method: 'POST', 
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, 
@@ -65,10 +65,11 @@ app.get('/api/install', (req, res) => {
     }
     console.log("Redirect URI:", REDIRECT_URI);
     
-    // Using the scopes from your last working URL
+    // *** FIX: Scopes updated to EXACTLY match your last URL ***
     const REQUIRED_SCOPES = 'crm.export oauth crm.objects.companies.read crm.schemas.contacts.read crm.objects.contacts.read crm.schemas.companies.read';
     const OPTIONAL_SCOPES = 'tickets crm.schemas.deals.read automation business-intelligence crm.objects.owners.read crm.objects.deals.read';
     
+    // *** FIX: Auth URL uses the correct EU domain ***
     const authUrl = `https://app-eu1.hubspot.com/oauth/authorize?client_id=${CLIENT_ID}&redirect_uri=${REDIRECT_URI}&scope=${REQUIRED_SCOPES.replace(/ /g, '%20')}&optional_scope=${OPTIONAL_SCOPES.replace(/ /g, '%20')}`;
     
     console.log("Generated Auth URL:", authUrl); 
@@ -95,6 +96,7 @@ app.get('/api/oauth-callback', async (req, res) => {
          return res.status(500).send("<h1>Configuration Error</h1><p>The server is missing the RENDER_EXTERNAL_URL environment variable. Cannot complete authentication.</p>");
     }
     try {
+        // *** FIX: Token exchange calls go to the global domain ***
         const response = await fetch(`${HUBSPOT_API_BASE}/oauth/v1/token`, { 
             method: 'POST', 
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, 
@@ -111,6 +113,7 @@ app.get('/api/oauth-callback', async (req, res) => {
         const tokenData = await response.json();
         const { refresh_token, access_token, expires_in } = tokenData;
 
+        // *** FIX: Token info calls go to the global domain ***
         const tokenInfoResponse = await fetch(`${HUBSPOT_API_BASE}/oauth/v1/access-tokens/${access_token}`);
         if (!tokenInfoResponse.ok) throw new Error('Failed to fetch HubSpot token info');
         const tokenInfo = await tokenInfoResponse.json();
@@ -130,7 +133,7 @@ app.get('/api/oauth-callback', async (req, res) => {
     }
 });
 
-// 2. Scope Check (No API calls, no change needed)
+// 2. Scope Check (No change needed)
 app.get('/api/check-scopes', async (req, res) => {
     const portalId = req.header('X-HubSpot-Portal-Id');
     if (!portalId) return res.status(400).json({ message: 'HubSpot Portal ID is missing.' });
@@ -157,7 +160,7 @@ app.get('/api/check-scopes', async (req, res) => {
 });
 
 
-// 3. Create Audit Job (No API calls, no change needed)
+// 3. Create Audit Job (No change needed)
 app.post('/api/create-audit-job', async (req, res) => {
     const portalId = req.header('X-HubSpot-Portal-Id');
     const { objectType } = req.body; 
@@ -207,7 +210,7 @@ app.post('/api/create-audit-job', async (req, res) => {
 });
 
 
-// 4. Check Audit Job Status (No API calls, no change needed)
+// 4. Check Audit Job Status (No change needed)
 app.get('/api/audit-status/:jobId', async (req, res) => {
     const { jobId } = req.params;
     if (!jobId) return res.status(400).json({ message: 'Job ID is missing.' });
@@ -242,7 +245,7 @@ app.get('/api/audit-status/:jobId', async (req, res) => {
 });
 
 
-// 5. Excel Download (No API calls, no change needed)
+// 5. Excel Download (No change needed)
 app.post('/api/download-excel', async (req, res) => {
     const { auditData, auditType, objectType } = req.body; 
     if (!auditData || !auditType) {
