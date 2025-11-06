@@ -1,6 +1,3 @@
-// This script runs on the 'auditpulsepro-web' service.
-// It handles web requests, creates jobs, and reports status.
-
 require('dotenv').config();
 const express = require('express');
 const fetch = require('node-fetch');
@@ -10,6 +7,7 @@ const path = require('path');
 const ExcelJS = require('exceljs');
 
 const app = express();
+// Render sets the PORT environment variable.
 const PORT = process.env.PORT || 10000; 
 
 app.use(cors());
@@ -17,17 +15,17 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // --- Environment Variables ---
-const CLIENT_ID = process.env.HUBSPOT_CLIENT_ID; // Should be ad8ec36f-d35e-471a-b8c1-5188725cdd57
+const CLIENT_ID = process.env.HUBSPOT_CLIENT_ID;
 const CLIENT_SECRET = process.env.HUBSPOT_CLIENT_SECRET;
-const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL; // Should be https://auditpulsepro-web.onrender.com
+const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL; 
 const REDIRECT_URI = `${RENDER_EXTERNAL_URL}/api/oauth-callback`;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
-// *** FIX: Define the API base URL for EU ***
-const HUBSPOT_API_BASE = 'https://api.eu1.hubapi.com';
+// *** THE REAL FIX: Use the correct EU domain ***
+const HUBSPOT_API_BASE = 'https://api.hubapieu1.com';
 
 // --- Helper: Get Access Token ---
 async function getValidAccessToken(portalId) {
@@ -37,7 +35,6 @@ async function getValidAccessToken(portalId) {
     if (new Date() > new Date(expires_at)) {
         console.log(`Refreshing token for portal ${portalId} (EU)`);
         
-        // *** FIX: Use EU1 domain for token refresh ***
         const response = await fetch(`${HUBSPOT_API_BASE}/oauth/v1/token`, { 
             method: 'POST', 
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, 
@@ -68,12 +65,10 @@ app.get('/api/install', (req, res) => {
     }
     console.log("Redirect URI:", REDIRECT_URI);
     
-    // *** FIX: Scopes updated to EXACTLY match your new working URL ***
+    // Using the scopes from your last working URL
     const REQUIRED_SCOPES = 'crm.export oauth crm.objects.companies.read crm.schemas.contacts.read crm.objects.contacts.read crm.schemas.companies.read';
-    
     const OPTIONAL_SCOPES = 'tickets crm.schemas.deals.read automation business-intelligence crm.objects.owners.read crm.objects.deals.read';
     
-    // *** FIX: Use EU1 domain for authorization ***
     const authUrl = `https://app-eu1.hubspot.com/oauth/authorize?client_id=${CLIENT_ID}&redirect_uri=${REDIRECT_URI}&scope=${REQUIRED_SCOPES.replace(/ /g, '%20')}&optional_scope=${OPTIONAL_SCOPES.replace(/ /g, '%20')}`;
     
     console.log("Generated Auth URL:", authUrl); 
@@ -100,7 +95,6 @@ app.get('/api/oauth-callback', async (req, res) => {
          return res.status(500).send("<h1>Configuration Error</h1><p>The server is missing the RENDER_EXTERNAL_URL environment variable. Cannot complete authentication.</p>");
     }
     try {
-        // *** FIX: Use EU1 domain for token exchange ***
         const response = await fetch(`${HUBSPOT_API_BASE}/oauth/v1/token`, { 
             method: 'POST', 
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, 
@@ -117,7 +111,6 @@ app.get('/api/oauth-callback', async (req, res) => {
         const tokenData = await response.json();
         const { refresh_token, access_token, expires_in } = tokenData;
 
-        // *** FIX: Use EU1 domain for token info ***
         const tokenInfoResponse = await fetch(`${HUBSPOT_API_BASE}/oauth/v1/access-tokens/${access_token}`);
         if (!tokenInfoResponse.ok) throw new Error('Failed to fetch HubSpot token info');
         const tokenInfo = await tokenInfoResponse.json();
