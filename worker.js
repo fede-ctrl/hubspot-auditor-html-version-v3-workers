@@ -12,8 +12,8 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 const CLIENT_ID = process.env.HUBSPOT_CLIENT_ID;
 const CLIENT_SECRET = process.env.HUBSPOT_CLIENT_SECRET;
 
-// *** THE REAL FIX: Use the correct EU domain ***
-const HUBSPOT_API_BASE = 'https://api.hubapieu1.com';
+// *** FIX: This is the one, global API domain for ALL accounts ***
+const HUBSPOT_API_BASE = 'https://api.hubapi.com';
 
 // --- Helper: Rate Limit Delay ---
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -37,8 +37,9 @@ async function getValidAccessToken(portalId) {
     let { refresh_token, access_token, expires_at } = installation;
 
     if (new Date() > new Date(expires_at)) {
-        console.log(`[Worker] Refreshing token for portal ${portalId} (EU)`);
+        console.log(`Refreshing token for portal ${portalId}`);
         
+        // *** FIX: Token refresh calls go to the global domain ***
         const response = await fetch(`${HUBSPOT_API_BASE}/oauth/v1/token`, { 
             method: 'POST', 
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, 
@@ -140,6 +141,7 @@ async function performCrmAudit(job) {
     // 1. Fetch ALL Properties
     await supabase.from('audit_jobs').update({ progress_message: 'Fetching all properties...' }).eq('job_id', job_id);
     
+    // *** FIX: Use global domain ***
     const propertiesUrl = `${HUBSPOT_API_BASE}/crm/v3/properties/${object_type}?archived=false&limit=100`;
     const allProperties = await fetchAllHubSpotData(propertiesUrl, accessToken, 'results');
     console.log(`[Worker] Job ${job_id}: Fetched ${allProperties.length} properties.`);
@@ -160,6 +162,7 @@ async function performCrmAudit(job) {
     console.log(`[Worker] Job ${job_id}: Requesting HubSpot export for ${object_type}...`);
     await supabase.from('audit_jobs').update({ progress_message: 'Requesting HubSpot export...' }).eq('job_id', job_id);
     
+    // *** FIX: Use global domain and correct endpoint ***
     const exportRequestUrl = `${HUBSPOT_API_BASE}/crm/v3/exports/export/async`;
     const exportRequestBody = {
         objectType: object_type,
@@ -188,6 +191,7 @@ async function performCrmAudit(job) {
     let exportStatus = 'PENDING';
     let fileUrl = null;
     
+    // *** FIX: Use global domain and correct endpoint ***
     const exportStatusUrl = `${HUBSPOT_API_BASE}/crm/v3/exports/export/async/tasks/${exportId}/status`;
     let pollCount = 0;
 
@@ -325,7 +329,7 @@ async function performWorkflowAudit(job) {
     // 1. Fetch all workflow summaries
     await supabase.from('audit_jobs').update({ progress_message: 'Fetching workflow list (V3)...' }).eq('job_id', job_id);
     
-    // *** FIX: Use EU1 domain ***
+    // *** FIX: Use global domain ***
     const workflowsUrl = `${HUBSPOT_API_BASE}/automation/v3/workflows?limit=100`;
     const allWorkflows = await fetchAllHubSpotData(workflowsUrl, accessToken, 'workflows');
     
