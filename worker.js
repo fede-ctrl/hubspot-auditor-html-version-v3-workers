@@ -1,14 +1,14 @@
-/* AuditPulse Pro worker.js (Array-safe RPC + robust job id extraction)
+/* AuditPulse Pro worker.js (Hardened)
    --------------------------------------------------
    - Atomic job claim via Supabase RPC (claim_audit_job)
-   - Normalizes RPC return (array vs object)
+   - Fallback: fetch claimed job row from audit_jobs if RPC shape lacks fields
    - Streaming CSV parse (bounded memory)
    - Robust HubSpot fetch with 429/5xx retry + Retry-After
    - Heartbeats and lease extension during processing
    - Rich KPIs and bounded drill-down sampling
    - Hard safety cap for per-record enrichers at 500k
-   - Dynamic schema handling (no fixed portal_id column)
-   - Inline token refresh helper (no new files)
+   - Dynamic schema handling (portal id & token columns tolerant)
+   - No new files
 */
 
 'use strict';
@@ -18,38 +18,38 @@ const fetch = require('node-fetch');
 const { parse } = require('csv-parse');
 const { v4: uuidv4 } = require('uuid');
 
-// ============== ENV CONFIG ==============
+// ================= ENV =================
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const HUBSPOT_API_BASE = process.env.HUBSPOT_API_BASE || 'https://api.hubapi.com';
 const HUBSPOT_CLIENT_ID = process.env.HUBSPOT_CLIENT_ID;
 const HUBSPOT_CLIENT_SECRET = process.env.HUBSPOT_CLIENT_SECRET;
-const NODE_ENV = process.env.NODE_ENV || 'production';
 const HUBSPOT_TOKEN_URL = 'https://api.hubapi.com/oauth/v1/token';
+const WORKER_ID = process.env.RENDER_SERVICE_NAME || `worker-${process.pid}-${uuidv4().slice(0, 8)}`;
 
-// ============== VALIDATION ==============
 if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
   console.error('[Worker] Missing SUPABASE_URL or SUPABASE_SERVICE_KEY.');
   process.exit(1);
 }
 
-// ============== CLIENTS ==============
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
   auth: { persistSession: false, autoRefreshToken: false }
 });
-const WORKER_ID = process.env.RENDER_SERVICE_NAME || `worker-${process.pid}-${uuidv4().slice(0, 8)}`;
 
-// ============== CONSTANTS ==============
-const MAX_RECORDS_ENRICHED = 500000;   // cap for per-record drill-down enrichment
-const SAMPLE_CAP_PER_LIST = 5000;      // sample list size per drill-down category
-const DUP_SAMPLE_PER_KEY = 10;         // per duplicate key
-const PROGRESS_EVERY_N = 25000;        // update progress every N parsed rows
-const HEARTBEAT_MS = 60000;            // extend lease every 60s
+// =============== CONSTANTS ===============
+const MAX_RECORDS_ENRICHED = 500000;
+const SAMPLE_CAP_PER_LIST = 5000;
+const DUP_SAMPLE_PER_KEY = 10;
+const PROGRESS_EVERY_N = 25000;
+const HEARTBEAT_MS = 60000;
 
-// ============== UTILS ==============
-async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+// =============== UTILS ===================
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const pick = (obj, keys, fallback = null) => {
+  for (const k of keys) if (obj && obj[k] !== undefined && obj[k] !== null && obj[k] !== '') return obj[k];
+  return fallback;
+};
 
-// Retry wrapper for HubSpot fetches
 async function hsFetch(url, options = {}, attempt = 1) {
   const res = await fetch(url, options);
   if (res.status === 429 || res.status >= 500) {
@@ -68,7 +68,7 @@ async function hsFetch(url, options = {}, attempt = 1) {
   return res;
 }
 
-// ============== TOKEN REFRESH (Dynamic schema-safe) ==============
+// =============== TOKEN REFRESH (schema-tolerant) ===============
 async function getValidAccessToken(portal_id_input) {
   const portal = String(portal_id_input || '').trim();
   if (!portal) throw new Error('Portal id is empty in job.');
@@ -91,13 +91,6 @@ async function getValidAccessToken(portal_id_input) {
   if (!rows || rows.length === 0) throw new Error(`No installation found for portal=${portal}`);
 
   const inst = rows[0];
-  const pick = (obj, keys, fallback = null) => {
-    for (const k of keys) {
-      if (obj[k] !== undefined && obj[k] !== null && obj[k] !== '') return obj[k];
-    }
-    return fallback;
-  };
-
   const accessToken = pick(inst, ['access_token', 'accesstoken', 'token', 'accessToken']);
   const refreshToken = pick(inst, ['refresh_token', 'refreshtoken', 'refreshToken']);
   const expiresAtRaw = pick(inst, ['expires_at', 'access_token_expires_at', 'expiresAt']);
@@ -142,18 +135,56 @@ async function getValidAccessToken(portal_id_input) {
   return newAccessToken;
 }
 
-// ============== SUPABASE RPC HELPERS ==============
-async function claimJob() {
+// =============== SUPABASE RPCS & HELPERS ===============
+async function claimJobViaRpc() {
   const { data, error } = await supabase.rpc('claim_audit_job', { p_worker_id: WORKER_ID });
   if (error) {
     console.error('[RPC] claim_audit_job error:', error.message);
     return null;
   }
-  // Some deployments return a single row; others return [row]
-  if (!data) return null;
+  // Normalize shape to object
   const row = Array.isArray(data) ? data[0] : data;
   return row || null;
 }
+
+async function fetchLastClaimedJobForWorker() {
+  // Get the most recently claimed running job for this worker
+  const { data, error } = await supabase
+    .from('audit_jobs')
+    .select('*')
+    .eq('status', 'running')
+    .eq('claimed_by', WORKER_ID)
+    .order('claimed_at', { ascending: false })
+    .limit(1);
+
+  if (error) {
+    console.error('[DB] fetchLastClaimedJobForWorker error:', error.message);
+    return null;
+  }
+  return data && data.length ? data[0] : null;
+}
+
+async function claimJob() {
+  // Step 1: RPC claim
+  let job = await claimJobViaRpc();
+  // Step 2: If RPC returned a shape without ids, fetch the claimed row directly
+  const hasId = job && (job.job_id || job.id || job.jobId || job['job_id'] || job['id'] || job['jobId']);
+  const hasPortal = job && (job.portal_id || job.portalId || job.hubspot_portal_id || job.account_id || job.hubspot_account_id ||
+                            job['portal_id'] || job['portalId'] || job['hubspot_portal_id'] || job['account_id'] || job['hubspot_account_id']);
+  if (job && hasId && hasPortal) return job;
+
+  // If we got "something" but fields are missing, fall back to DB read
+  if (job) {
+    const fallback = await fetchLastClaimedJobForWorker();
+    if (fallback) return fallback;
+    // If still nothing coherent, treat as no job
+    return null;
+  }
+
+  // If RPC returned null, there is no work
+  return null;
+}
+
 async function updateProgress(job_id, message, processed = null, total = null) {
   try {
     await supabase.rpc('update_audit_job_progress', {
@@ -166,6 +197,7 @@ async function updateProgress(job_id, message, processed = null, total = null) {
     console.warn('[RPC] update_audit_job_progress failed:', e.message);
   }
 }
+
 async function extendLease(job_id, minutes = 15) {
   try {
     await supabase.rpc('extend_audit_job_lease', { p_job_id: job_id, p_minutes: minutes });
@@ -174,19 +206,12 @@ async function extendLease(job_id, minutes = 15) {
   }
 }
 
-// ============== HUBSPOT EXPORT HELPERS ==============
+// =============== HUBSPOT EXPORT HELPERS ===============
 async function startExport(objectType, accessToken) {
   const res = await hsFetch(`${HUBSPOT_API_BASE}/crm/v3/exports/export/async`, {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json;charset=utf-8'
-    },
-    body: JSON.stringify({
-      exportType: 'CSV',
-      format: 'CSV',
-      objectType
-    })
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json;charset=utf-8' },
+    body: JSON.stringify({ exportType: 'CSV', format: 'CSV', objectType })
   });
   const json = await res.json();
   if (!json || !json.id) throw new Error('Export start did not return id.');
@@ -202,20 +227,18 @@ async function waitForExportReady(taskId, accessToken, job_id) {
     const json = await res.json();
     const state = (json.state || json.status || '').toString().toUpperCase();
 
-    if (state === 'CANCELED' || state === 'FAILED')
-      throw new Error(`Export task failed: ${JSON.stringify(json).slice(0, 400)}`);
-
-    if ((state === 'COMPLETED' || state === 'COMPLETE') && json?.result?.url)
+    if (state === 'CANCELED' || state === 'FAILED') throw new Error(`Export task failed: ${JSON.stringify(json).slice(0, 400)}`);
+    if ((state === 'COMPLETED' || state === 'COMPLETE') && json?.result?.url) {
       return { downloadUrl: json.result.url, total: json?.result?.rowCount || null };
+    }
 
     const pct = json?.progress?.percentage || null;
-    const msg = pct != null ? `Export preparing at ${pct}%` : 'Export preparing...';
-    await updateProgress(job_id, msg);
+    await updateProgress(job_id, pct != null ? `Export preparing at ${pct}%` : 'Export preparing...');
     await sleep(Math.min(10000, 2000 + attempts * 500));
   }
 }
 
-// ============== CSV STREAM PARSING & KPIs ==============
+// =============== CSV STREAM & KPIs ===============
 function normalizeEmail(e) { return (e || '').trim().toLowerCase(); }
 function normalizeDomain(d) { return (d || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, ''); }
 function normalizePhone(p) { return (p || '').replace(/\D+/g, ''); }
@@ -248,7 +271,6 @@ async function processCsvStream({ res, objectType, job_id }) {
       .pipe(parser)
       .on('data', async row => {
         total++;
-
         if (total % PROGRESS_EVERY_N === 0)
           await updateProgress(job_id, `Processing ${total.toLocaleString()} records...`, total, null);
 
@@ -267,7 +289,6 @@ async function processCsvStream({ res, objectType, job_id }) {
         if (objectType === 'contacts') {
           const email = normalizeEmail(row.email || row['Email']);
           if (email && !isValidEmailSimple(email)) invalidEmailCount++;
-
           const assocCompany = row.associatedcompanyid || row['Associated Company ID'] || '';
           if (!assocCompany && orphanedRecords.length < SAMPLE_CAP_PER_LIST && enrichedCount < MAX_RECORDS_ENRICHED)
             orphanedRecords.push({ id: recordId, email });
@@ -339,17 +360,14 @@ async function processCsvStream({ res, objectType, job_id }) {
                 .map(([value, v]) => ({ value, count: v.count, sample: v.records }))
             }
           },
-          properties: {
-            fillRates,
-            top20Sparsest: fillRates.slice(0, 20)
-          }
+          properties: { fillRates, top20Sparsest: fillRates.slice(0, 20) }
         });
       })
       .on('error', err => { clearInterval(heartbeat); reject(err); });
   });
 }
 
-// ============== WORKFLOW AUDIT ==============
+// =============== WORKFLOW AUDIT =================
 async function performWorkflowAudit({ portal_id, accessToken, job_id }) {
   await updateProgress(job_id, 'Fetching workflows...');
   const results = { totalWorkflows: 0, risks: { exposedApiKeys: [], deprecatedEmailV1: [] } };
@@ -369,23 +387,20 @@ async function performWorkflowAudit({ portal_id, accessToken, job_id }) {
       const actions = wf.actions || [];
       for (const a of actions) {
         const blob = JSON.stringify(a).toLowerCase();
-        if (/hapikey=/.test(blob))
-          results.risks.exposedApiKeys.push({ workflowId: wf.id, name: wf.name });
-        if (/marketing-emails[\/\\]v1[\/\\]emails/.test(blob))
-          results.risks.deprecatedEmailV1.push({ workflowId: wf.id, name: wf.name });
+        if (/hapikey=/.test(blob)) results.risks.exposedApiKeys.push({ workflowId: wf.id, name: wf.name });
+        if (/marketing-emails[\/\\]v1[\/\\]emails/.test(blob)) results.risks.deprecatedEmailV1.push({ workflowId: wf.id, name: wf.name });
       }
     }
 
     after = json.paging?.next?.after;
     if (!after) break;
-
     await updateProgress(job_id, `Workflows fetched: ${results.totalWorkflows}`);
   }
 
   return results;
 }
 
-// ============== CRM AUDIT ==============
+// =============== CRM AUDIT ======================
 async function performCrmAudit({ portal_id, objectType, job_id }) {
   await updateProgress(job_id, `Starting ${objectType} export...`);
   const accessToken = await getValidAccessToken(portal_id);
@@ -415,18 +430,29 @@ async function performCrmAudit({ portal_id, objectType, job_id }) {
   };
 }
 
-// ============== JOB HANDLER ==============
-async function handleJob(job) {
-  // Flexible extraction for different schemas
-  const job_id =
-    job.job_id || job.id || job.jobId || job['job_id'] || job['id'] || job['jobId'];
+// =============== JOB HANDLER ====================
+function extractJobFields(job) {
+  const job_id = pick(job, ['job_id', 'id', 'jobId', 'JOB_ID', 'JobId', 'JobID']);
+  const portal_id = pick(job, [
+    'portal_id', 'portalId', 'hubspot_portal_id', 'account_id', 'hubspot_account_id',
+    'PORTAL_ID', 'PortalId', 'HubSpot_Portal_ID', 'accountId'
+  ]);
+  const type = pick(job, ['object_type', 'type', 'objectType', 'OBJECT_TYPE']) || 'contacts';
+  return { job_id, portal_id, type };
+}
 
-  const portal_id =
-    job.portal_id || job.portalId || job.hubspot_portal_id || job.account_id || job.hubspot_account_id ||
-    job['portal_id'] || job['portalId'] || job['hubspot_portal_id'] || job['account_id'] || job['hubspot_account_id'];
+async function handleJob(rawJob) {
+  // Prefer the raw job; if fields missing, get the definitive claimed row
+  let job = rawJob;
+  let { job_id, portal_id, type } = extractJobFields(job);
 
-  const type =
-    job.object_type || job.type || job.objectType || job['object_type'] || job['objectType'] || 'contacts';
+  if (!job_id || !portal_id) {
+    const claimed = await fetchLastClaimedJobForWorker();
+    if (claimed) {
+      job = claimed;
+      ({ job_id, portal_id, type } = extractJobFields(job));
+    }
+  }
 
   if (!job_id) throw new Error('Job id not found on job row.');
   if (!portal_id) throw new Error('portal_id not found on job row.');
@@ -434,11 +460,11 @@ async function handleJob(job) {
   try {
     await updateProgress(job_id, `Job claimed on ${new Date().toISOString()}`);
 
+    // Token sanity
     const accessToken = await getValidAccessToken(portal_id);
-    // optional sanity ping (non-fatal)
     await hsFetch(`${HUBSPOT_API_BASE}/crm/v3/properties/contacts`, {
       headers: { Authorization: `Bearer ${accessToken}` }
-    }).catch(() => {});
+    }).catch(() => {}); // non-fatal ping
 
     let results = null;
     if (type === 'contacts' || type === 'companies') {
@@ -449,7 +475,7 @@ async function handleJob(job) {
       throw new Error(`Unsupported object_type: ${type}`);
     }
 
-    // Write results
+    // Write results (try results then result_json)
     let writeOk = false;
     {
       const { error } = await supabase
@@ -492,7 +518,7 @@ async function handleJob(job) {
   }
 }
 
-// ============== POLL LOOP ==============
+// =============== POLL LOOP =======================
 async function pollForJobs() {
   try {
     const job = await claimJob();
