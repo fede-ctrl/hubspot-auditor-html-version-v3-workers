@@ -1,13 +1,13 @@
-/* AuditPulse Pro worker.js (Hardened)
+/* AuditPulse Pro worker.js (clean & resilient)
    --------------------------------------------------
    - Atomic job claim via Supabase RPC (claim_audit_job)
-   - Fallback: fetch claimed job row from audit_jobs if RPC shape lacks fields
+   - Treats all-null RPC result as "no job"
    - Streaming CSV parse (bounded memory)
    - Robust HubSpot fetch with 429/5xx retry + Retry-After
    - Heartbeats and lease extension during processing
    - Rich KPIs and bounded drill-down sampling
    - Hard safety cap for per-record enrichers at 500k
-   - Dynamic schema handling (portal id & token columns tolerant)
+   - Dynamic schema handling for installations tokens
    - No new files
 */
 
@@ -25,7 +25,6 @@ const HUBSPOT_API_BASE = process.env.HUBSPOT_API_BASE || 'https://api.hubapi.com
 const HUBSPOT_CLIENT_ID = process.env.HUBSPOT_CLIENT_ID;
 const HUBSPOT_CLIENT_SECRET = process.env.HUBSPOT_CLIENT_SECRET;
 const HUBSPOT_TOKEN_URL = 'https://api.hubapi.com/oauth/v1/token';
-const WORKER_ID = process.env.RENDER_SERVICE_NAME || `worker-${process.pid}-${uuidv4().slice(0, 8)}`;
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
   console.error('[Worker] Missing SUPABASE_URL or SUPABASE_SERVICE_KEY.');
@@ -36,12 +35,14 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
   auth: { persistSession: false, autoRefreshToken: false }
 });
 
+const WORKER_ID = process.env.RENDER_SERVICE_NAME || `worker-${process.pid}-${uuidv4().slice(0, 8)}`;
+
 // =============== CONSTANTS ===============
-const MAX_RECORDS_ENRICHED = 500000;
-const SAMPLE_CAP_PER_LIST = 5000;
-const DUP_SAMPLE_PER_KEY = 10;
-const PROGRESS_EVERY_N = 25000;
-const HEARTBEAT_MS = 60000;
+const MAX_RECORDS_ENRICHED = 500000;   // per-record drill-down enrichment cap
+const SAMPLE_CAP_PER_LIST = 5000;      // drill-down sample size per list
+const DUP_SAMPLE_PER_KEY = 10;         // sample per duplicate key
+const PROGRESS_EVERY_N = 25000;        // progress update cadence
+const HEARTBEAT_MS = 60000;            // extend lease every 60s
 
 // =============== UTILS ===================
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -50,6 +51,7 @@ const pick = (obj, keys, fallback = null) => {
   return fallback;
 };
 
+// Robust HubSpot fetch with retries
 async function hsFetch(url, options = {}, attempt = 1) {
   const res = await fetch(url, options);
   if (res.status === 429 || res.status >= 500) {
@@ -142,47 +144,17 @@ async function claimJobViaRpc() {
     console.error('[RPC] claim_audit_job error:', error.message);
     return null;
   }
-  // Normalize shape to object
+  // Normalize to object
   const row = Array.isArray(data) ? data[0] : data;
-  return row || null;
-}
 
-async function fetchLastClaimedJobForWorker() {
-  // Get the most recently claimed running job for this worker
-  const { data, error } = await supabase
-    .from('audit_jobs')
-    .select('*')
-    .eq('status', 'running')
-    .eq('claimed_by', WORKER_ID)
-    .order('claimed_at', { ascending: false })
-    .limit(1);
+  // Some PostgREST setups return a composite row with all nulls (no job matched)
+  if (!row) return null;
 
-  if (error) {
-    console.error('[DB] fetchLastClaimedJobForWorker error:', error.message);
-    return null;
-  }
-  return data && data.length ? data[0] : null;
-}
+  // Detect "all nulls" quickly
+  const hasAnyValue = Object.values(row).some(v => v !== null && v !== undefined);
+  if (!hasAnyValue) return null;
 
-async function claimJob() {
-  // Step 1: RPC claim
-  let job = await claimJobViaRpc();
-  // Step 2: If RPC returned a shape without ids, fetch the claimed row directly
-  const hasId = job && (job.job_id || job.id || job.jobId || job['job_id'] || job['id'] || job['jobId']);
-  const hasPortal = job && (job.portal_id || job.portalId || job.hubspot_portal_id || job.account_id || job.hubspot_account_id ||
-                            job['portal_id'] || job['portalId'] || job['hubspot_portal_id'] || job['account_id'] || job['hubspot_account_id']);
-  if (job && hasId && hasPortal) return job;
-
-  // If we got "something" but fields are missing, fall back to DB read
-  if (job) {
-    const fallback = await fetchLastClaimedJobForWorker();
-    if (fallback) return fallback;
-    // If still nothing coherent, treat as no job
-    return null;
-  }
-
-  // If RPC returned null, there is no work
-  return null;
+  return row;
 }
 
 async function updateProgress(job_id, message, processed = null, total = null) {
@@ -227,13 +199,15 @@ async function waitForExportReady(taskId, accessToken, job_id) {
     const json = await res.json();
     const state = (json.state || json.status || '').toString().toUpperCase();
 
-    if (state === 'CANCELED' || state === 'FAILED') throw new Error(`Export task failed: ${JSON.stringify(json).slice(0, 400)}`);
-    if ((state === 'COMPLETED' || state === 'COMPLETE') && json?.result?.url) {
+    if (state === 'CANCELED' || state === 'FAILED')
+      throw new Error(`Export task failed: ${JSON.stringify(json).slice(0, 400)}`);
+
+    if ((state === 'COMPLETED' || state === 'COMPLETE') && json?.result?.url)
       return { downloadUrl: json.result.url, total: json?.result?.rowCount || null };
-    }
 
     const pct = json?.progress?.percentage || null;
-    await updateProgress(job_id, pct != null ? `Export preparing at ${pct}%` : 'Export preparing...');
+    const msg = pct != null ? `Export preparing at ${pct}%` : 'Export preparing...';
+    await updateProgress(job_id, msg);
     await sleep(Math.min(10000, 2000 + attempts * 500));
   }
 }
@@ -271,6 +245,7 @@ async function processCsvStream({ res, objectType, job_id }) {
       .pipe(parser)
       .on('data', async row => {
         total++;
+
         if (total % PROGRESS_EVERY_N === 0)
           await updateProgress(job_id, `Processing ${total.toLocaleString()} records...`, total, null);
 
@@ -289,6 +264,7 @@ async function processCsvStream({ res, objectType, job_id }) {
         if (objectType === 'contacts') {
           const email = normalizeEmail(row.email || row['Email']);
           if (email && !isValidEmailSimple(email)) invalidEmailCount++;
+
           const assocCompany = row.associatedcompanyid || row['Associated Company ID'] || '';
           if (!assocCompany && orphanedRecords.length < SAMPLE_CAP_PER_LIST && enrichedCount < MAX_RECORDS_ENRICHED)
             orphanedRecords.push({ id: recordId, email });
@@ -442,20 +418,13 @@ function extractJobFields(job) {
 }
 
 async function handleJob(rawJob) {
-  // Prefer the raw job; if fields missing, get the definitive claimed row
-  let job = rawJob;
-  let { job_id, portal_id, type } = extractJobFields(job);
+  // rawJob may be an object with null fields. Extract and validate.
+  const { job_id, portal_id, type } = extractJobFields(rawJob || {});
 
   if (!job_id || !portal_id) {
-    const claimed = await fetchLastClaimedJobForWorker();
-    if (claimed) {
-      job = claimed;
-      ({ job_id, portal_id, type } = extractJobFields(job));
-    }
+    // This is not an error; it means the RPC returned an all-null row. Treat as no work.
+    return;
   }
-
-  if (!job_id) throw new Error('Job id not found on job row.');
-  if (!portal_id) throw new Error('portal_id not found on job row.');
 
   try {
     await updateProgress(job_id, `Job claimed on ${new Date().toISOString()}`);
@@ -475,7 +444,7 @@ async function handleJob(rawJob) {
       throw new Error(`Unsupported object_type: ${type}`);
     }
 
-    // Write results (try results then result_json)
+    // Write results
     let writeOk = false;
     {
       const { error } = await supabase
@@ -521,11 +490,14 @@ async function handleJob(rawJob) {
 // =============== POLL LOOP =======================
 async function pollForJobs() {
   try {
-    const job = await claimJob();
+    const job = await claimJobViaRpc();
+
+    // If no job or all-null row, wait and poll again
     if (!job) {
       await sleep(5000);
       return pollForJobs();
     }
+
     await handleJob(job);
     setImmediate(pollForJobs);
   } catch (e) {
