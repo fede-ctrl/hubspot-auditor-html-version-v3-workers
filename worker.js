@@ -1,4 +1,4 @@
-/* AuditPulse Pro worker.js (clean & resilient)
+/* AuditPulse Pro worker.js (column-safe installations lookup)
    --------------------------------------------------
    - Atomic job claim via Supabase RPC (claim_audit_job)
    - Treats all-null RPC result as "no job"
@@ -7,8 +7,7 @@
    - Heartbeats and lease extension during processing
    - Rich KPIs and bounded drill-down sampling
    - Hard safety cap for per-record enrichers at 500k
-   - Dynamic schema handling for installations tokens
-   - No new files
+   - Dynamic, column-safe token lookup & refresh (no .or on unknown cols)
 */
 
 'use strict';
@@ -70,29 +69,64 @@ async function hsFetch(url, options = {}, attempt = 1) {
   return res;
 }
 
-// =============== TOKEN REFRESH (schema-tolerant) ===============
+/*
+  Column-safe finder for installations:
+  - Tries candidate portal columns one by one.
+  - Skips columns that do not exist (PostgREST returns error "column ... does not exist").
+  - Returns { row, matchedColumn } on success.
+*/
+async function findInstallationByPortalId(portal) {
+  const candidates = [
+    'portal_id',
+    'hubspot_portal_id',
+    'portalid',
+    'account_id',
+    'hubspot_account_id'
+  ];
+
+  for (const col of candidates) {
+    try {
+      const { data, error } = await supabase
+        .from('installations')
+        .select('*')
+        .eq(col, portal)
+        .limit(1);
+
+      // If PostgREST says "column does not exist", skip to next candidate
+      if (error) {
+        const msg = String(error.message || '').toLowerCase();
+        if (msg.includes('column') && msg.includes('does not exist')) {
+          continue;
+        }
+        // Other errors should stop
+        throw error;
+      }
+
+      if (data && data.length) {
+        return { row: data[0], matchedColumn: col };
+      }
+    } catch (e) {
+      const msg = String(e.message || '').toLowerCase();
+      if (msg.includes('column') && msg.includes('does not exist')) {
+        continue;
+      }
+      throw e;
+    }
+  }
+
+  return { row: null, matchedColumn: null };
+}
+
+// =============== TOKEN REFRESH (column-safe) ===============
 async function getValidAccessToken(portal_id_input) {
   const portal = String(portal_id_input || '').trim();
   if (!portal) throw new Error('Portal id is empty in job.');
 
-  const orFilter = [
-    `portal_id.eq.${portal}`,
-    `hubspot_portal_id.eq.${portal}`,
-    `portalid.eq.${portal}`,
-    `account_id.eq.${portal}`,
-    `hubspot_account_id.eq.${portal}`
-  ].join(',');
+  const { row: inst, matchedColumn } = await findInstallationByPortalId(portal);
+  if (!inst || !matchedColumn) {
+    throw new Error(`No installation found for portal=${portal}`);
+  }
 
-  const { data: rows, error: selErr } = await supabase
-    .from('installations')
-    .select('*')
-    .or(orFilter)
-    .limit(1);
-
-  if (selErr) throw new Error(`[Supabase] installations read failed: ${selErr.message}`);
-  if (!rows || rows.length === 0) throw new Error(`No installation found for portal=${portal}`);
-
-  const inst = rows[0];
   const accessToken = pick(inst, ['access_token', 'accesstoken', 'token', 'accessToken']);
   const refreshToken = pick(inst, ['refresh_token', 'refreshtoken', 'refreshToken']);
   const expiresAtRaw = pick(inst, ['expires_at', 'access_token_expires_at', 'expiresAt']);
@@ -102,6 +136,7 @@ async function getValidAccessToken(portal_id_input) {
   if (accessToken && expiresAt > now) return accessToken;
   if (!refreshToken) throw new Error('Missing refresh_token, cannot refresh.');
 
+  // Refresh
   const params = new URLSearchParams();
   params.append('grant_type', 'refresh_token');
   params.append('client_id', HUBSPOT_CLIENT_ID);
@@ -124,14 +159,16 @@ async function getValidAccessToken(portal_id_input) {
   const expiresIn = token.expires_in || 1800;
   const newExpiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
 
+  // Update the same matched column to avoid unknown-column errors
   const { error: updErr } = await supabase
     .from('installations')
     .update({
       access_token: newAccessToken,
       refresh_token: newRefreshToken,
-      expires_at: newExpiresAt
+      expires_at: newExpiresAt,
+      updated_at: new Date().toISOString()
     })
-    .or(orFilter);
+    .eq(matchedColumn, portal);
 
   if (updErr) throw new Error(`[Supabase] installations update failed: ${updErr.message}`);
   return newAccessToken;
@@ -144,16 +181,10 @@ async function claimJobViaRpc() {
     console.error('[RPC] claim_audit_job error:', error.message);
     return null;
   }
-  // Normalize to object
   const row = Array.isArray(data) ? data[0] : data;
-
-  // Some PostgREST setups return a composite row with all nulls (no job matched)
   if (!row) return null;
-
-  // Detect "all nulls" quickly
   const hasAnyValue = Object.values(row).some(v => v !== null && v !== undefined);
   if (!hasAnyValue) return null;
-
   return row;
 }
 
@@ -418,18 +449,15 @@ function extractJobFields(job) {
 }
 
 async function handleJob(rawJob) {
-  // rawJob may be an object with null fields. Extract and validate.
   const { job_id, portal_id, type } = extractJobFields(rawJob || {});
 
-  if (!job_id || !portal_id) {
-    // This is not an error; it means the RPC returned an all-null row. Treat as no work.
-    return;
-  }
+  // If RPC returned an all-null composite, treat as no work
+  if (!job_id || !portal_id) return;
 
   try {
     await updateProgress(job_id, `Job claimed on ${new Date().toISOString()}`);
 
-    // Token sanity
+    // Token sanity ping is optional; we already refresh during export start
     const accessToken = await getValidAccessToken(portal_id);
     await hsFetch(`${HUBSPOT_API_BASE}/crm/v3/properties/contacts`, {
       headers: { Authorization: `Bearer ${accessToken}` }
@@ -444,7 +472,7 @@ async function handleJob(rawJob) {
       throw new Error(`Unsupported object_type: ${type}`);
     }
 
-    // Write results
+    // Store results
     let writeOk = false;
     {
       const { error } = await supabase
@@ -491,13 +519,10 @@ async function handleJob(rawJob) {
 async function pollForJobs() {
   try {
     const job = await claimJobViaRpc();
-
-    // If no job or all-null row, wait and poll again
     if (!job) {
       await sleep(5000);
       return pollForJobs();
     }
-
     await handleJob(job);
     setImmediate(pollForJobs);
   } catch (e) {
