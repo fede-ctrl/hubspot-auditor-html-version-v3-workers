@@ -1,6 +1,7 @@
-/* AuditPulse Pro worker.js (Final, Step 2)
+/* AuditPulse Pro worker.js (Array-safe RPC + robust job id extraction)
    --------------------------------------------------
    - Atomic job claim via Supabase RPC (claim_audit_job)
+   - Normalizes RPC return (array vs object)
    - Streaming CSV parse (bounded memory)
    - Robust HubSpot fetch with 429/5xx retry + Retry-After
    - Heartbeats and lease extension during processing
@@ -148,7 +149,10 @@ async function claimJob() {
     console.error('[RPC] claim_audit_job error:', error.message);
     return null;
   }
-  return data || null;
+  // Some deployments return a single row; others return [row]
+  if (!data) return null;
+  const row = Array.isArray(data) ? data[0] : data;
+  return row || null;
 }
 async function updateProgress(job_id, message, processed = null, total = null) {
   try {
