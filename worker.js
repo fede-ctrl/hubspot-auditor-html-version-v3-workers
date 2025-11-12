@@ -314,6 +314,8 @@ async function crunchCsv({ response, objectType, jobId }) {
         reject(err);
       });
   });
+  const json = await res.json();
+  return Array.isArray(json?.results) ? json.results : [];
 }
 
 async function performCrmAudit(job) {
