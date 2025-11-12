@@ -182,20 +182,6 @@ function buildWorkbook(job, result) {
   const props = Array.isArray(result?.propertyFill) ? result.propertyFill : [];
   props.forEach(p => propsSheet.addRow({ property: p.property, filled: p.filled, fillRate: p.fillRate }));
 
-  const risks = result?.risks || {};
-  const riskApi = Array.isArray(risks.exposedApiKeys) ? risks.exposedApiKeys : [];
-  const riskLegacy = Array.isArray(risks.legacyEmailApi) ? risks.legacyEmailApi : [];
-  if (riskApi.length || riskLegacy.length) {
-    const riskSheet = workbook.addWorksheet('Workflow Risks');
-    riskSheet.columns = [
-      { header: 'Type', key: 'type', width: 25 },
-      { header: 'Workflow ID', key: 'id', width: 20 },
-      { header: 'Workflow Name', key: 'name', width: 45 }
-    ];
-    riskApi.forEach(item => riskSheet.addRow({ type: 'Exposed API key', id: item.id, name: item.name }));
-    riskLegacy.forEach(item => riskSheet.addRow({ type: 'Legacy email API', id: item.id, name: item.name }));
-  }
-
   return workbook;
 }
 

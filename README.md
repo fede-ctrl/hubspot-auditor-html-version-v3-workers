@@ -1,47 +1,12 @@
-# AuditPulse Pro
+# AuditPulse Minimal Working Setup
 
-AuditPulse Pro is a production-grade, asynchronous auditing platform for HubSpot administrators. It provides deep diagnostics for CRM hygiene, workflow safety, and property completeness while delegating heavy data processing to a dedicated worker service.
+AuditPulse is a Render + Supabase + HubSpot stack that runs long running CRM audits in a background worker and exposes the progress through a lightweight web SPA.
 
-## Final Product Summary
+This repository contains the production-ready minimal setup for the worker/web pair. Follow the steps below to provision Supabase, configure Render, and deploy both services.
 
-* **No API limits:** Streams HubSpot's Async Export API so audits cover millions of records without pagination caps.
-* **Asynchronous job engine:** Web tier stays responsive while a worker claims jobs via Supabase RPC leases.
-* **Actionable outputs:** Excel workbooks summarize KPIs, duplicates, orphan records, property fill rates, and workflow risks.
-* **Production hardened:** Built for Render + Supabase with strict OAuth handling, RLS-enabled tables, and environment-specific configuration.
+## 1. Supabase schema
 
-## System Architecture
-
-| Component | Role | Key Responsibilities |
-| --- | --- | --- |
-| Web service (`server.js`) | User-facing API and frontend host | OAuth 2.0 auth, installation status, job creation, status polling, Excel export |
-| Worker service (`worker.js`) | Background processor | Claims jobs, runs HubSpot exports, streams CSV analysis, updates progress |
-| Supabase (PostgreSQL + RPCs) | Shared state and coordination | Stores OAuth tokens, enforces leases, exposes RPCs for claim/progress/lease |
-| Frontend (`public/index.html`) | Single-page UI | Install flow, status checks, audit launcher, progress tracker, results viewer |
-
-No audit work runs inside the web process. Jobs persist in `audit_jobs`, are claimed exclusively through `claim_audit_job`, and advance asynchronously until completion.
-
-## Key Features
-
-1. **Asynchronous CRM audits**
-   * Uses HubSpot Async Export API to pull Contacts and Companies without record limits.
-   * Streams CSV line-by-line with bounded memory and automatic retry/backoff on 429/5xx responses.
-   * Maintains live progress, processed counts, and job leases via Supabase RPCs.
-2. **Workflow & security review**
-   * Fetches all workflows and flags risky actions such as exposed API keys or deprecated Marketing Email API calls.
-3. **Data health KPIs**
-   * Total records, orphaned records, ownerless records, stale records, invalid emails (contacts), lifecycle stage gaps.
-   * Property fill rates for sparsest fields and duplicate detection (email/phone/domain) with sample IDs.
-4. **Excel report generation**
-   * Multi-sheet workbook for summary KPIs, orphan samples, duplicate keys, property fill rates, and workflow risks.
-5. **Reliable operations**
-   * Lease/heartbeat model prevents double-processing and recovers from crashes.
-   * Environment-driven configuration shared between services; OAuth tokens stored only in Supabase.
-
-## Deployment Checklist
-
-### 1. Supabase schema
-
-Run the following SQL *once* in the Supabase SQL editor to normalize the schema around `portal_id`, enable RLS, and install RPC helpers for the worker.
+Run the following SQL *once* in the Supabase SQL editor. It normalizes the schema to a single `portal_id` column, adds indexes, enables row level security (RLS), and installs the RPC helpers that the worker relies on.
 
 ```sql
 -- =========================
@@ -164,9 +129,9 @@ as $$
 $$;
 ```
 
-### 2. Render configuration
+## 2. Render configuration
 
-Configure both Render services (Web and Worker) with the same environment variables:
+Configure both Render services (Web and Worker) with the exact same environment variables:
 
 ```
 SUPABASE_URL=your_supabase_url
@@ -180,16 +145,15 @@ RENDER_EXTERNAL_URL=https://auditpulsepro-web.onrender.com
 NODE_ENV=production
 ```
 
-### 3. Deploy commands
+## 3. Deploy commands
 
-* **Web service:** `node server.js`
-* **Worker service:** `node worker.js`
+* **Web service** start command: `node server.js`
+* **Worker service** start command: `node worker.js`
 
-### 4. Smoke flow after deploy
+After deployment:
 
-1. Visit `/api/install`, authorize the HubSpot app, and return to `/?portal_id=...`.
-2. Click **Check** in the UI to verify installation (badge should show **Installed**).
-3. Launch a Contacts, Companies, or Workflows audit and watch the progress badge update.
-4. Download the Excel workbook once the job reports **Complete**.
+1. Visit `/api/install` on the web service to authorize the HubSpot app.
+2. You will be redirected back to `/?portal_id=...`.
+3. Use the UI to verify installation status, run an audit, and download the Excel export when complete.
 
-The repository keeps the battle-tested scripts intact—no extra files required. Configure Supabase and Render as described above to obtain a fully functional production deployment.
+This README intentionally keeps the instructions tight so you can deploy the minimal production setup without adding new files or deviating from the battle-tested scripts in this repository.

@@ -113,19 +113,6 @@
             <tbody id="propertyTable" class="divide-y divide-slate-200"></tbody>
           </table>
         </div>
-        <div id="riskSection" class="space-y-3 hidden">
-          <h3 class="font-semibold">Workflow risks</h3>
-          <div class="grid gap-4 lg:grid-cols-2">
-            <div>
-              <h4 class="text-sm font-semibold text-slate-600">Exposed API keys</h4>
-              <ul id="riskApiList" class="space-y-1 text-sm text-slate-600"></ul>
-            </div>
-            <div>
-              <h4 class="text-sm font-semibold text-slate-600">Legacy email API actions</h4>
-              <ul id="riskLegacyList" class="space-y-1 text-sm text-slate-600"></ul>
-            </div>
-          </div>
-        </div>
       </section>
     </div>
 
@@ -148,9 +135,6 @@
       const orphanTable = document.getElementById('orphanTable');
       const duplicateTable = document.getElementById('duplicateTable');
       const propertyTable = document.getElementById('propertyTable');
-      const riskSection = document.getElementById('riskSection');
-      const riskApiList = document.getElementById('riskApiList');
-      const riskLegacyList = document.getElementById('riskLegacyList');
 
       const initialPortal = qs.get('portal_id');
       if (initialPortal) portalInput.value = initialPortal;
@@ -324,42 +308,6 @@
           tr.innerHTML = `<td class="py-2 pr-3">${row.property}</td><td class="py-2 pr-3">${row.filled}</td><td class="py-2">${row.fillRate}</td>`;
           propertyTable.appendChild(tr);
         });
-
-        riskSection.classList.add('hidden');
-        riskApiList.innerHTML = '';
-        riskLegacyList.innerHTML = '';
-        const risks = result && result.risks ? result.risks : {};
-        const apiRisks = Array.isArray(risks.exposedApiKeys) ? risks.exposedApiKeys : [];
-        const legacyRisks = Array.isArray(risks.legacyEmailApi) ? risks.legacyEmailApi : [];
-
-        if (apiRisks.length || legacyRisks.length) {
-          riskSection.classList.remove('hidden');
-          if (apiRisks.length) {
-            apiRisks.forEach(item => {
-              const li = document.createElement('li');
-              li.textContent = `${item.name || 'Unnamed workflow'} (ID ${item.id})`;
-              riskApiList.appendChild(li);
-            });
-          } else {
-            const li = document.createElement('li');
-            li.className = 'text-slate-400';
-            li.textContent = 'None detected';
-            riskApiList.appendChild(li);
-          }
-
-          if (legacyRisks.length) {
-            legacyRisks.forEach(item => {
-              const li = document.createElement('li');
-              li.textContent = `${item.name || 'Unnamed workflow'} (ID ${item.id})`;
-              riskLegacyList.appendChild(li);
-            });
-          } else {
-            const li = document.createElement('li');
-            li.className = 'text-slate-400';
-            li.textContent = 'None detected';
-            riskLegacyList.appendChild(li);
-          }
-        }
       }
 
       checkBtn.addEventListener('click', checkInstall);

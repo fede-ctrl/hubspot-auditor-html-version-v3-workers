@@ -74,6 +74,7 @@ async function refreshAccessToken(refreshToken) {
     const text = await res.text().catch(() => '');
     throw new Error(`[HubSpot OAuth] refresh failed: ${res.status} ${res.statusText} ${text.slice(0, 400)}`);
   }
+  if (!install.refresh_token) throw new Error('Installation is missing a refresh_token');
 
   return res.json();
 }
@@ -212,8 +213,6 @@ async function crunchCsv({ response, objectType, jobId }) {
     let ownerless = 0;
     let invalidEmails = 0;
     let stale = 0;
-    let orphanCount = 0;
-    let missingLifecycle = 0;
     const staleCutoff = new Date(Date.now() - 180 * 24 * 3600 * 1000);
 
     const heartbeat = setInterval(() => extendLease(jobId).catch(() => {}), HEARTBEAT_MS);
@@ -243,9 +242,6 @@ async function crunchCsv({ response, objectType, jobId }) {
         const ownerId = row.hubspot_owner_id || row.owner_id || '';
         if (!ownerId) ownerless += 1;
 
-        const lifecycle = row.lifecyclestage || row.lifecycle_stage || row['Lifecycle Stage'];
-        if (!lifecycle) missingLifecycle += 1;
-
         const lastModified = parseDate(row.hs_lastmodified_date || row.lastmodifieddate || row['Last Modified Date']);
         if (lastModified && lastModified < staleCutoff) stale += 1;
 
@@ -256,9 +252,6 @@ async function crunchCsv({ response, objectType, jobId }) {
           if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) invalidEmails += 1;
 
           const assocCompany = row.associatedcompanyid || row['Associated Company ID'];
-          if (!assocCompany) {
-            orphanCount += 1;
-          }
           if (!assocCompany && orphanSample.length < SAMPLE_CAP) {
             orphanSample.push({ id: recordId, label: email });
           }
@@ -290,9 +283,6 @@ async function crunchCsv({ response, objectType, jobId }) {
           }
 
           const assocContacts = Number(row.num_associated_contacts || row['Number of Associated Contacts'] || 0);
-          if (!assocContacts) {
-            orphanCount += 1;
-          }
           if (!assocContacts && orphanSample.length < SAMPLE_CAP) {
             orphanSample.push({ id: recordId, label: domain });
           }
@@ -308,19 +298,14 @@ async function crunchCsv({ response, objectType, jobId }) {
         sparsest.sort((a, b) => parseFloat(a.fillRate) - parseFloat(b.fillRate));
 
         const duplicateKeys = Array.from(duplicates.values()).filter(item => item.count > 1);
-        const duplicateRecordCount = duplicateKeys.reduce((sum, item) => sum + item.count, 0);
 
         resolve({
           total,
           ownerless,
           invalidEmails,
           stale,
-          orphanCount,
-          missingLifecycle,
           orphanSample,
           duplicateKeys,
-          duplicateKeyCount: duplicateKeys.length,
-          duplicateRecordCount,
           propertyFill: sparsest.slice(0, 20)
         });
       })
@@ -347,11 +332,8 @@ async function performCrmAudit(job) {
 
   const summary = [
     { label: 'Total records', value: kpis.total.toLocaleString() },
-    { label: 'Orphaned records', value: kpis.orphanCount.toLocaleString() },
     { label: 'Ownerless records', value: kpis.ownerless.toLocaleString() },
-    { label: 'Lifecycle stage missing', value: kpis.missingLifecycle.toLocaleString() },
     { label: 'Stale (>180d)', value: kpis.stale.toLocaleString() },
-    { label: 'Duplicate keys', value: kpis.duplicateKeyCount.toLocaleString() }
   ];
   if (object_type === 'contacts') {
     summary.push({ label: 'Invalid emails', value: kpis.invalidEmails.toLocaleString() });
@@ -367,16 +349,6 @@ async function performCrmAudit(job) {
       samples: item.samples
     })).slice(0, 100),
     propertyFill: kpis.propertyFill,
-    counts: {
-      total: kpis.total,
-      orphaned: kpis.orphanCount,
-      ownerless: kpis.ownerless,
-      missingLifecycle: kpis.missingLifecycle,
-      stale: kpis.stale,
-      duplicateKeys: kpis.duplicateKeyCount,
-      duplicateRecords: kpis.duplicateRecordCount,
-      invalidEmails: object_type === 'contacts' ? kpis.invalidEmails : null
-    },
     metadata: {
       portalId: portal_id,
       objectType: object_type,
@@ -433,12 +405,7 @@ async function performWorkflowAudit(job) {
       objectType: 'workflows',
       generatedAt: new Date().toISOString()
     },
-    risks,
-    counts: {
-      total,
-      exposedApiKeys: risks.exposedApiKeys.length,
-      legacyEmailApi: risks.legacyEmailApi.length
-    }
+    risks
   };
 
   return { payload, totals: total };
