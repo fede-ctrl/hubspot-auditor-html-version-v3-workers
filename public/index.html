@@ -1,347 +1,373 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <title>AuditPulse Pro</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <!-- Tailwind via CDN (allowed by server Helmet CSP) -->
-  <script src="https://cdn.tailwindcss.com"></script>
-  <style>
-    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
-    .card { @apply bg-white rounded-2xl shadow p-5; }
-    .btn  { @apply px-4 py-2 rounded-xl text-sm font-semibold transition; }
-    .btn-primary { @apply bg-indigo-600 text-white hover:bg-indigo-700; }
-    .btn-ghost   { @apply bg-gray-100 text-gray-900 hover:bg-gray-200; }
-    .badge { @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-medium; }
-    .badge-ok { @apply bg-green-100 text-green-800; }
-    .badge-warn { @apply bg-yellow-100 text-yellow-800; }
-    .badge-err { @apply bg-red-100 text-red-800; }
-    .muted { @apply text-gray-500; }
-    .kbd { @apply border rounded px-1 mono text-xs; }
-  </style>
-</head>
-<body class="bg-gray-50 text-gray-900">
-  <div class="max-w-5xl mx-auto px-4 py-8 space-y-8">
-
-    <!-- Header -->
-    <header class="flex items-center justify-between">
-      <div class="flex items-center gap-3">
-        <div class="h-10 w-10 rounded-xl bg-indigo-600 flex items-center justify-center text-white font-bold">A</div>
-        <h1 class="text-2xl font-bold">AuditPulse Pro</h1>
-      </div>
-      <a id="installLink" href="/api/install" class="btn btn-ghost">Install on HubSpot</a>
-    </header>
-
-    <!-- Install / Portal -->
-    <section class="card space-y-4">
-      <div class="flex items-center justify-between gap-4 flex-wrap">
-        <div class="space-y-1">
-          <div class="text-sm text-gray-600">Portal ID</div>
-          <input id="portalId" class="w-64 border rounded-xl px-3 py-2" placeholder="e.g. 1234567" />
-          <p class="text-xs text-gray-500">Auto-filled after OAuth. You can override it.</p>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AuditPulse</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      .badge { @apply inline-flex items-center px-2 py-1 rounded-full text-xs font-semibold; }
+      .badge-warn { @apply bg-yellow-100 text-yellow-800; }
+      .badge-ok { @apply bg-green-100 text-green-800; }
+      .badge-err { @apply bg-red-100 text-red-800; }
+      .card { @apply bg-white rounded-xl shadow p-6 space-y-4; }
+    </style>
+  </head>
+  <body class="bg-slate-100 text-slate-900">
+    <div class="max-w-5xl mx-auto px-4 py-8 space-y-8">
+      <header class="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+        <div>
+          <h1 class="text-2xl font-bold">AuditPulse minimal</h1>
+          <p class="text-sm text-slate-500">HubSpot data quality audits powered by Supabase worker leases.</p>
         </div>
+        <a id="installLink" href="/api/install" class="inline-flex items-center justify-center px-4 py-2 rounded-lg bg-indigo-600 text-white text-sm font-semibold">Install on HubSpot</a>
+      </header>
 
-        <div class="space-y-1">
-          <div class="text-sm text-gray-600">Status</div>
-          <div id="installStatus" class="badge badge-warn">Not installed</div>
-        </div>
-
-        <div class="space-y-1">
-          <div class="text-sm text-gray-600">Actions</div>
-          <div class="flex gap-2">
-            <button id="btnContacts" class="btn btn-primary">Run Contacts Audit</button>
-            <button id="btnCompanies" class="btn btn-ghost">Run Companies Audit</button>
-            <button id="btnWorkflows" class="btn btn-ghost">Run Workflows Audit</button>
+      <section class="card">
+        <div class="grid gap-4 md:grid-cols-4 md:items-end">
+          <label class="space-y-2">
+            <span class="text-sm font-medium text-slate-600">Portal ID</span>
+            <input id="portalInput" class="w-full rounded-lg border border-slate-300 px-3 py-2" placeholder="123456" />
+          </label>
+          <div class="space-y-2">
+            <span class="text-sm font-medium text-slate-600">Install status</span>
+            <div id="statusBadge" class="badge badge-warn">Unknown</div>
+          </div>
+          <div class="space-y-2">
+            <span class="text-sm font-medium text-slate-600">Actions</span>
+            <div class="flex gap-2">
+              <button id="checkBtn" class="px-4 py-2 rounded-lg border border-slate-300 text-sm font-semibold">Check</button>
+            </div>
+          </div>
+          <div class="space-y-2">
+            <span class="text-sm font-medium text-slate-600">Run audit</span>
+            <div class="flex flex-wrap gap-2">
+              <button data-type="contacts" class="run-btn px-4 py-2 rounded-lg bg-indigo-600 text-white text-sm font-semibold disabled:opacity-40">Contacts</button>
+              <button data-type="companies" class="run-btn px-4 py-2 rounded-lg bg-slate-200 text-sm font-semibold disabled:opacity-40">Companies</button>
+              <button data-type="workflows" class="run-btn px-4 py-2 rounded-lg bg-slate-200 text-sm font-semibold disabled:opacity-40">Workflows</button>
+            </div>
           </div>
         </div>
-      </div>
-    </section>
+      </section>
 
-    <!-- Job Panel -->
-    <section id="jobPanel" class="card space-y-4 hidden">
-      <div class="flex items-center justify-between">
-        <div>
-          <div class="text-sm text-gray-600">Job</div>
-          <div class="mono text-sm" id="jobMeta">—</div>
+      <section id="jobSection" class="card hidden">
+        <div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+          <div>
+            <div class="text-sm text-slate-500">Job</div>
+            <div id="jobMeta" class="text-sm font-semibold"></div>
+          </div>
+          <button id="downloadBtn" class="px-4 py-2 rounded-lg bg-emerald-600 text-white text-sm font-semibold hidden">Download Excel</button>
         </div>
-        <div>
-          <button id="btnDownload" class="btn btn-primary hidden">Download Excel</button>
+        <div class="space-y-2">
+          <div class="flex items-center gap-2">
+            <div id="jobStatusBadge" class="badge badge-warn">pending</div>
+            <span id="jobMessage" class="text-sm text-slate-600">Waiting…</span>
+          </div>
+          <div class="w-full bg-slate-200 rounded-full h-2 overflow-hidden">
+            <div id="jobProgressBar" class="bg-indigo-600 h-2" style="width: 0%"></div>
+          </div>
+          <div id="jobCounts" class="text-xs text-slate-500">0 / 0</div>
         </div>
-      </div>
+        <div id="jobError" class="hidden rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700"></div>
+      </section>
 
-      <div id="progressWrap" class="space-y-2">
-        <div class="flex items-center gap-2">
-          <div id="statusBadge" class="badge badge-warn">pending</div>
-          <div id="progressMsg" class="text-sm">Queued…</div>
-        </div>
-        <div class="w-full bg-gray-200 rounded-full h-2.5">
-          <div id="progressBar" class="bg-indigo-600 h-2.5 rounded-full" style="width: 2%"></div>
-        </div>
-        <div id="progressNums" class="text-xs text-gray-500">0 / ?</div>
-      </div>
-
-      <div id="errorBox" class="hidden rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800"></div>
-    </section>
-
-    <!-- Results -->
-    <section id="resultsPanel" class="card space-y-6 hidden">
-      <h2 class="text-lg font-semibold">Results</h2>
-
-      <div id="summary" class="grid grid-cols-2 md:grid-cols-3 gap-4"></div>
-
-      <div class="space-y-3">
-        <h3 class="font-semibold">Orphaned sample</h3>
-        <div class="overflow-auto">
-          <table class="w-full text-sm">
-            <thead>
-              <tr class="text-left text-gray-500">
+      <section id="resultSection" class="card hidden">
+        <h2 class="text-lg font-semibold">Results</h2>
+        <div id="summaryGrid" class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3"></div>
+        <div class="space-y-3">
+          <h3 class="font-semibold">Orphan sample</h3>
+          <table class="min-w-full text-sm">
+            <thead class="text-left text-slate-500">
+              <tr>
                 <th class="py-2 pr-3">Record ID</th>
-                <th class="py-2">Email/Domain</th>
+                <th class="py-2">Label</th>
               </tr>
             </thead>
-            <tbody id="orphanTbody"></tbody>
+            <tbody id="orphanTable" class="divide-y divide-slate-200"></tbody>
           </table>
         </div>
-      </div>
-
-      <div class="space-y-3">
-        <h3 class="font-semibold">Top duplicate keys</h3>
-        <div class="overflow-auto">
-          <table class="w-full text-sm">
-            <thead>
-              <tr class="text-left text-gray-500">
+        <div class="space-y-3">
+          <h3 class="font-semibold">Duplicate keys</h3>
+          <table class="min-w-full text-sm">
+            <thead class="text-left text-slate-500">
+              <tr>
                 <th class="py-2 pr-3">Type</th>
                 <th class="py-2 pr-3">Key</th>
                 <th class="py-2 pr-3">Count</th>
                 <th class="py-2">Sample IDs</th>
               </tr>
             </thead>
-            <tbody id="dupTbody"></tbody>
+            <tbody id="duplicateTable" class="divide-y divide-slate-200"></tbody>
           </table>
         </div>
-      </div>
-
-      <div class="space-y-3">
-        <h3 class="font-semibold">Sparsest properties (top 20)</h3>
-        <div class="overflow-auto">
-          <table class="w-full text-sm">
-            <thead>
-              <tr class="text-left text-gray-500">
+        <div class="space-y-3">
+          <h3 class="font-semibold">Sparsest properties</h3>
+          <table class="min-w-full text-sm">
+            <thead class="text-left text-slate-500">
+              <tr>
                 <th class="py-2 pr-3">Property</th>
                 <th class="py-2 pr-3">Filled</th>
                 <th class="py-2">Fill rate</th>
               </tr>
             </thead>
-            <tbody id="propsTbody"></tbody>
+            <tbody id="propertyTable" class="divide-y divide-slate-200"></tbody>
           </table>
         </div>
-      </div>
-    </section>
-
-    <!-- Footer -->
-    <footer class="text-center text-xs text-gray-500">
-      Built for long-running audits. Uses background workers, streaming CSV, and Excel export.
-    </footer>
-  </div>
-
-  <script>
-    // ---------- Small helpers ----------
-    const $ = sel => document.querySelector(sel);
-    const qs = new URLSearchParams(location.search);
-    function fmtPct(n) { return (Math.round((n || 0) * 10000) / 100).toFixed(2) + '%'; }
-    function setBadge(el, kind, text) {
-      el.className = 'badge ' + (kind === 'ok' ? 'badge-ok' : kind === 'err' ? 'badge-err' : 'badge-warn');
-      el.textContent = text;
-    }
-
-    // ---------- Init from URL ----------
-    const installed = qs.get('installed') === '1';
-    const portalFromUrl = qs.get('portal_id');
-    if (portalFromUrl) $('#portalId').value = portalFromUrl;
-
-    // Status badge for install
-    setBadge($('#installStatus'), installed ? 'ok' : 'warn', installed ? 'Installed' : 'Not installed');
-
-    // ---------- API calls ----------
-    async function createJob(portal_id, object_type) {
-      const res = await fetch('/api/create-audit-job', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ portal_id, object_type })
-      });
-      if (!res.ok) {
-        const t = await res.text().catch(()=>'');
-        throw new Error('Create job failed: ' + t);
-      }
-      return res.json();
-    }
-
-    async function fetchStatus(jobId) {
-      const res = await fetch('/api/audit-status/' + encodeURIComponent(jobId));
-      if (!res.ok) {
-        const t = await res.text().catch(()=>'');
-        throw new Error('Status failed: ' + t);
-      }
-      return res.json();
-    }
-
-    // ---------- UI state ----------
-    let currentJobId = null;
-    let currentType = null;
-
-    function showJobPanel(job) {
-      $('#jobPanel').classList.remove('hidden');
-      $('#errorBox').classList.add('hidden');
-      $('#resultsPanel').classList.add('hidden');
-      $('#btnDownload').classList.add('hidden');
-      $('#jobMeta').textContent = `${job.job_id} • ${job.object_type}`;
-      setBadge($('#statusBadge'), 'warn', job.status || 'pending');
-      $('#progressMsg').textContent = job.progress_message || 'Queued…';
-      $('#progressBar').style.width = '2%';
-      $('#progressNums').textContent = '0 / ?';
-    }
-
-    function updateProgressUI(job) {
-      const status = job.status || 'pending';
-      const msg = job.progress_message || '';
-      const processed = Number(job.processed_records || 0);
-      const total = Number(job.total_records || 0);
-      let pct = 0;
-      if (total > 0) pct = Math.max(0, Math.min(100, Math.round((processed / total) * 100)));
-
-      setBadge($('#statusBadge'),
-        status === 'complete' ? 'ok' : status === 'failed' ? 'err' : 'warn',
-        status
-      );
-      $('#progressMsg').textContent = msg;
-      $('#progressBar').style.width = (pct || 2) + '%';
-      $('#progressNums').textContent = `${processed.toLocaleString()} / ${total ? total.toLocaleString() : '?'}`;
-    }
-
-    function showError(errText) {
-      const box = $('#errorBox');
-      box.textContent = errText;
-      box.classList.remove('hidden');
-    }
-
-    // ---------- Exponential backoff poller ----------
-    async function pollUntilDone(jobId, onUpdate) {
-      let delay = 1500;          // start fast
-      const maxDelay = 10000;    // cap to 10s
-
-      while (true) {
-        try {
-          const job = await fetchStatus(jobId);
-          onUpdate(job);
-
-          if (job.status === 'complete') return job;
-          if (job.status === 'failed') throw new Error(job.error || 'Job failed.');
-
-        } catch (e) {
-          showError(e.message || String(e));
-        }
-
-        await new Promise(r => setTimeout(r, delay));
-        delay = Math.min(maxDelay, Math.round(delay * 1.5));
-      }
-    }
-
-    // ---------- Results rendering ----------
-    function renderResults(job) {
-      const results = job.results || job.result_json || {};
-      $('#resultsPanel').classList.remove('hidden');
-
-      // Summary cards
-      const counts = results.counts || {};
-      const totals = results.totals || {};
-      const meta = results.meta || {};
-      const rows = [
-        ['Object Type', results.objectType || job.object_type],
-        ['Total Records', (totals.totalRecords || 0).toLocaleString()],
-        ['Ownerless', counts.ownerless ?? ''],
-        ['Lifecycle Missing', counts.lifecycleMissing ?? ''],
-        ['Invalid Emails (contacts)', counts.invalidEmails ?? ''],
-        ['Stale Records (>=180d)', counts.staleRecords ?? ''],
-        ['Processed Cap', meta.processedCap ?? '']
-      ];
-      $('#summary').innerHTML = rows.map(([k, v]) => `
-        <div class="border rounded-xl p-4">
-          <div class="text-xs text-gray-500">${k}</div>
-          <div class="text-base font-semibold">${v}</div>
+        <div id="riskSection" class="space-y-3 hidden">
+          <h3 class="font-semibold">Workflow risks</h3>
+          <div class="grid gap-4 lg:grid-cols-2">
+            <div>
+              <h4 class="text-sm font-semibold text-slate-600">Exposed API keys</h4>
+              <ul id="riskApiList" class="space-y-1 text-sm text-slate-600"></ul>
+            </div>
+            <div>
+              <h4 class="text-sm font-semibold text-slate-600">Legacy email API actions</h4>
+              <ul id="riskLegacyList" class="space-y-1 text-sm text-slate-600"></ul>
+            </div>
+          </div>
         </div>
-      `).join('');
+      </section>
+    </div>
 
-      // Orphaned sample
-      const orphan = (results.orphaned && results.orphaned.sample) || [];
-      $('#orphanTbody').innerHTML = orphan.map(o => `
-        <tr class="border-t">
-          <td class="py-2 pr-3 mono">${o.id || ''}</td>
-          <td class="py-2">${o.email || o.domain || ''}</td>
-        </tr>
-      `).join('') || `<tr><td class="py-2 text-gray-500" colspan="2">No sample available.</td></tr>`;
+    <script>
+      const qs = new URLSearchParams(location.search);
+      const portalInput = document.getElementById('portalInput');
+      const statusBadge = document.getElementById('statusBadge');
+      const checkBtn = document.getElementById('checkBtn');
+      const runButtons = Array.from(document.querySelectorAll('.run-btn'));
+      const jobSection = document.getElementById('jobSection');
+      const jobMeta = document.getElementById('jobMeta');
+      const jobStatusBadge = document.getElementById('jobStatusBadge');
+      const jobMessage = document.getElementById('jobMessage');
+      const jobProgressBar = document.getElementById('jobProgressBar');
+      const jobCounts = document.getElementById('jobCounts');
+      const jobError = document.getElementById('jobError');
+      const downloadBtn = document.getElementById('downloadBtn');
+      const resultSection = document.getElementById('resultSection');
+      const summaryGrid = document.getElementById('summaryGrid');
+      const orphanTable = document.getElementById('orphanTable');
+      const duplicateTable = document.getElementById('duplicateTable');
+      const propertyTable = document.getElementById('propertyTable');
+      const riskSection = document.getElementById('riskSection');
+      const riskApiList = document.getElementById('riskApiList');
+      const riskLegacyList = document.getElementById('riskLegacyList');
 
-      // Duplicates combined
-      const dup = results.duplicates || {};
-      const samples = dup.samples || {};
-      const blocks = [];
-      for (const typ of ['byEmail', 'byDomain', 'byPhone']) {
-        for (const item of (samples[typ] || [])) {
-          const ids = (item.sample || []).map(s => s.id).filter(Boolean).join(', ');
-          blocks.push(`
-            <tr class="border-t">
-              <td class="py-2 pr-3">${typ}</td>
-              <td class="py-2 pr-3 mono">${item.value}</td>
-              <td class="py-2 pr-3">${item.count}</td>
-              <td class="py-2 mono">${ids}</td>
-            </tr>
-          `);
+      const initialPortal = qs.get('portal_id');
+      if (initialPortal) portalInput.value = initialPortal;
+      if (qs.get('installed') === '1' && initialPortal) {
+        setBadge(statusBadge, 'ok', 'Installed');
+        enableRunButtons(true);
+      }
+
+      let activeJobId = null;
+      let pollDelay = 2000;
+      let pollTimer = null;
+
+      function setBadge(el, state, text) {
+        el.className = `badge ${state === 'ok' ? 'badge-ok' : state === 'err' ? 'badge-err' : 'badge-warn'}`;
+        el.textContent = text;
+      }
+
+      function enableRunButtons(enabled) {
+        runButtons.forEach(btn => (btn.disabled = !enabled));
+      }
+
+      async function checkInstall() {
+        const portalId = portalInput.value.trim();
+        if (!portalId) return;
+        setBadge(statusBadge, 'warn', 'Checking…');
+        enableRunButtons(false);
+        try {
+          const res = await fetch(`/api/install-status?portal_id=${encodeURIComponent(portalId)}`);
+          if (!res.ok) throw new Error('Request failed');
+          const data = await res.json();
+          if (data.installed) {
+            setBadge(statusBadge, 'ok', 'Installed');
+            enableRunButtons(true);
+          } else {
+            setBadge(statusBadge, 'warn', 'Not installed');
+          }
+        } catch (err) {
+          setBadge(statusBadge, 'err', 'Error');
+          console.error(err);
         }
       }
-      $('#dupTbody').innerHTML = blocks.join('') || `<tr><td class="py-2 text-gray-500" colspan="4">No duplicates detected in sample.</td></tr>`;
 
-      // Sparsest properties top 20
-      const props = (results.properties && results.properties.top20Sparsest) || [];
-      $('#propsTbody').innerHTML = props.map(p => `
-        <tr class="border-t">
-          <td class="py-2 pr-3 mono">${p.property}</td>
-          <td class="py-2 pr-3">${(p.filled || 0).toLocaleString()}</td>
-          <td class="py-2">${fmtPct(p.fillRate || 0)}</td>
-        </tr>
-      `).join('') || `<tr><td class="py-2 text-gray-500" colspan="3">N/A</td></tr>`;
-    }
+      async function startJob(objectType) {
+        const portalId = portalInput.value.trim();
+        if (!portalId) return;
+        enableRunButtons(false);
+        setBadge(statusBadge, 'warn', 'Checking…');
+        await checkInstall();
+        if (statusBadge.classList.contains('badge-ok') === false) {
+          enableRunButtons(true);
+          return;
+        }
 
-    // ---------- Handlers ----------
-    async function startAudit(kind) {
-      const portal_id = $('#portalId').value.trim();
-      if (!portal_id) {
-        alert('Please enter a Portal ID.');
-        return;
+        try {
+          const res = await fetch('/api/create-job', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ portalId, objectType })
+          });
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({ error: 'Failed to create job' }));
+            throw new Error(err.error || 'Failed to create job');
+          }
+          const data = await res.json();
+          activeJobId = data.jobId;
+          pollDelay = 2000;
+          jobSection.classList.remove('hidden');
+          jobMeta.textContent = `${objectType} • ${portalId}`;
+          setBadge(jobStatusBadge, 'warn', 'pending');
+          jobMessage.textContent = 'Queued…';
+          jobProgressBar.style.width = '0%';
+          jobCounts.textContent = '0 / 0';
+          jobError.classList.add('hidden');
+          resultSection.classList.add('hidden');
+          downloadBtn.classList.add('hidden');
+          downloadBtn.onclick = () => {};
+          schedulePoll();
+        } catch (err) {
+          enableRunButtons(true);
+          setBadge(jobStatusBadge, 'err', 'error');
+          jobError.classList.remove('hidden');
+          jobError.textContent = err.message;
+        }
       }
-      currentType = kind;
 
-      // Create job
-      const { job_id } = await createJob(portal_id, kind);
-      currentJobId = job_id;
+      async function pollJobStatus() {
+        if (!activeJobId) return;
+        try {
+          const res = await fetch(`/api/job-status?job_id=${encodeURIComponent(activeJobId)}`);
+          if (!res.ok) throw new Error('Status request failed');
+          const job = await res.json();
+          updateJobUi(job);
+          if (job.status === 'complete' || job.status === 'failed') {
+            activeJobId = null;
+            return;
+          }
+        } catch (err) {
+          console.error(err);
+        }
+        schedulePoll();
+      }
 
-      // Show panel and begin polling
-      showJobPanel({ job_id, object_type: kind, status: 'pending', progress_message: 'Queued…' });
+      function schedulePoll() {
+        clearTimeout(pollTimer);
+        pollTimer = setTimeout(() => {
+          pollDelay = Math.min(pollDelay + 1000, 10000);
+          pollJobStatus();
+        }, pollDelay);
+      }
 
-      const finalJob = await pollUntilDone(job_id, (job) => {
-        updateProgressUI(job);
-      });
+      function updateJobUi(job) {
+        setBadge(jobStatusBadge, job.status === 'complete' ? 'ok' : job.status === 'failed' ? 'err' : 'warn', job.status);
+        jobMessage.textContent = job.progressMessage || '';
+        const processed = Number(job.processedRecords || 0);
+        const total = Number(job.totalRecords || 0);
+        const percent = total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : job.status === 'complete' ? 100 : 0;
+        jobProgressBar.style.width = `${percent}%`;
+        jobCounts.textContent = `${processed.toLocaleString()} / ${total ? total.toLocaleString() : '—'}`;
 
-      // Enable download and render results
-      $('#btnDownload').classList.remove('hidden');
-      $('#btnDownload').onclick = () => {
-        location.href = '/api/download-excel?jobId=' + encodeURIComponent(job_id);
-      };
+        if (job.error) {
+          jobError.classList.remove('hidden');
+          jobError.textContent = job.error;
+        } else {
+          jobError.classList.add('hidden');
+        }
 
-      renderResults(finalJob);
-    }
+        if (job.status === 'complete') {
+          enableRunButtons(true);
+          renderResults(job.resultJson || job.results || {});
+          downloadBtn.classList.remove('hidden');
+          downloadBtn.onclick = () => {
+            window.location.href = `/api/download?job_id=${encodeURIComponent(job.jobId)}`;
+          };
+        } else if (job.status === 'failed') {
+          enableRunButtons(true);
+        }
+      }
 
-    $('#btnContacts').addEventListener('click', () => startAudit('contacts'));
-    $('#btnCompanies').addEventListener('click', () => startAudit('companies'));
-    $('#btnWorkflows').addEventListener('click', () => startAudit('workflows'));
-  </script>
-</body>
+      function renderResults(result) {
+        resultSection.classList.remove('hidden');
+        summaryGrid.innerHTML = '';
+        const summary = Array.isArray(result.summary) ? result.summary : [];
+        summary.forEach(item => {
+          const card = document.createElement('div');
+          card.className = 'rounded-lg border border-slate-200 p-3';
+          card.innerHTML = `<div class="text-xs text-slate-500">${item.label || item.metric}</div><div class="text-xl font-semibold">${item.value}</div>`;
+          summaryGrid.appendChild(card);
+        });
+
+        orphanTable.innerHTML = '';
+        const orphanSample = Array.isArray(result.orphanSamples) ? result.orphanSamples : [];
+        orphanSample.forEach(row => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td class="py-2 pr-3">${row.id || ''}</td><td class="py-2">${row.label || row.email || ''}</td>`;
+          orphanTable.appendChild(tr);
+        });
+
+        duplicateTable.innerHTML = '';
+        const duplicates = Array.isArray(result.duplicateKeys) ? result.duplicateKeys : [];
+        duplicates.forEach(row => {
+          const tr = document.createElement('tr');
+          const samples = Array.isArray(row.samples) ? row.samples.join(', ') : '';
+          tr.innerHTML = `<td class="py-2 pr-3">${row.type}</td><td class="py-2 pr-3">${row.key}</td><td class="py-2 pr-3">${row.count}</td><td class="py-2">${samples}</td>`;
+          duplicateTable.appendChild(tr);
+        });
+
+        propertyTable.innerHTML = '';
+        const properties = Array.isArray(result.propertyFill) ? result.propertyFill : [];
+        properties.forEach(row => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td class="py-2 pr-3">${row.property}</td><td class="py-2 pr-3">${row.filled}</td><td class="py-2">${row.fillRate}</td>`;
+          propertyTable.appendChild(tr);
+        });
+
+        riskSection.classList.add('hidden');
+        riskApiList.innerHTML = '';
+        riskLegacyList.innerHTML = '';
+        const risks = result && result.risks ? result.risks : {};
+        const apiRisks = Array.isArray(risks.exposedApiKeys) ? risks.exposedApiKeys : [];
+        const legacyRisks = Array.isArray(risks.legacyEmailApi) ? risks.legacyEmailApi : [];
+
+        if (apiRisks.length || legacyRisks.length) {
+          riskSection.classList.remove('hidden');
+          if (apiRisks.length) {
+            apiRisks.forEach(item => {
+              const li = document.createElement('li');
+              li.textContent = `${item.name || 'Unnamed workflow'} (ID ${item.id})`;
+              riskApiList.appendChild(li);
+            });
+          } else {
+            const li = document.createElement('li');
+            li.className = 'text-slate-400';
+            li.textContent = 'None detected';
+            riskApiList.appendChild(li);
+          }
+
+          if (legacyRisks.length) {
+            legacyRisks.forEach(item => {
+              const li = document.createElement('li');
+              li.textContent = `${item.name || 'Unnamed workflow'} (ID ${item.id})`;
+              riskLegacyList.appendChild(li);
+            });
+          } else {
+            const li = document.createElement('li');
+            li.className = 'text-slate-400';
+            li.textContent = 'None detected';
+            riskLegacyList.appendChild(li);
+          }
+        }
+      }
+
+      checkBtn.addEventListener('click', checkInstall);
+      runButtons.forEach(btn => btn.addEventListener('click', () => startJob(btn.dataset.type)));
+
+      if (initialPortal) {
+        checkInstall();
+      }
+    </script>
+  </body>
 </html>
