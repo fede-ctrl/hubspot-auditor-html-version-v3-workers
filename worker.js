@@ -1,13 +1,10 @@
-/* AuditPulse Pro worker.js (column-safe installations lookup)
+/* AuditPulse Pro worker.js (API base sanitizer + hardened)
    --------------------------------------------------
-   - Atomic job claim via Supabase RPC (claim_audit_job)
-   - Treats all-null RPC result as "no job"
-   - Streaming CSV parse (bounded memory)
-   - Robust HubSpot fetch with 429/5xx retry + Retry-After
-   - Heartbeats and lease extension during processing
-   - Rich KPIs and bounded drill-down sampling
-   - Hard safety cap for per-record enrichers at 500k
-   - Dynamic, column-safe token lookup & refresh (no .or on unknown cols)
+   - Uses HubSpot global API base (api.hubapi.com). If env is mis-set to eu1 etc., auto-corrects.
+   - Atomic job claim via Supabase RPC (claim_audit_job), treats all-null as "no job"
+   - Streaming CSV parse (bounded memory); retries with backoff; heartbeats
+   - KPIs + 500k per-record enrichment cap
+   - Column-safe installations lookup & token refresh (no .or on unknown columns)
 */
 
 'use strict';
@@ -20,15 +17,34 @@ const { v4: uuidv4 } = require('uuid');
 // ================= ENV =================
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
-const HUBSPOT_API_BASE = process.env.HUBSPOT_API_BASE || 'https://api.hubapi.com';
 const HUBSPOT_CLIENT_ID = process.env.HUBSPOT_CLIENT_ID;
 const HUBSPOT_CLIENT_SECRET = process.env.HUBSPOT_CLIENT_SECRET;
-const HUBSPOT_TOKEN_URL = 'https://api.hubapi.com/oauth/v1/token';
+const RAW_API_BASE = process.env.HUBSPOT_API_BASE || 'https://api.hubapi.com';
+const HUBSPOT_TOKEN_URL = 'https://api.hubapi.com/oauth/v1/token'; // OAuth is always global
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
   console.error('[Worker] Missing SUPABASE_URL or SUPABASE_SERVICE_KEY.');
   process.exit(1);
 }
+
+// Normalize API base (defend against bad values like https://api.eu1.hubapi.com or eu1.api.hubapi.com)
+function sanitizeApiBase(input) {
+  try {
+    const u = new URL(input);
+    const h = (u.hostname || '').toLowerCase();
+    // Known good host
+    if (h === 'api.hubapi.com') return 'https://api.hubapi.com';
+    // Common bad variants -> correct them
+    if (h.includes('eu1.') || h.includes('us1.') || h.includes('api.')) {
+      return 'https://api.hubapi.com';
+    }
+    return 'https://api.hubapi.com';
+  } catch {
+    return 'https://api.hubapi.com';
+  }
+}
+const HUBSPOT_API_BASE = sanitizeApiBase(RAW_API_BASE);
+console.log('[Worker] Using HUBSPOT_API_BASE:', HUBSPOT_API_BASE);
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
   auth: { persistSession: false, autoRefreshToken: false }
@@ -72,48 +88,26 @@ async function hsFetch(url, options = {}, attempt = 1) {
 /*
   Column-safe finder for installations:
   - Tries candidate portal columns one by one.
-  - Skips columns that do not exist (PostgREST returns error "column ... does not exist").
+  - Skips columns that do not exist.
   - Returns { row, matchedColumn } on success.
 */
 async function findInstallationByPortalId(portal) {
-  const candidates = [
-    'portal_id',
-    'hubspot_portal_id',
-    'portalid',
-    'account_id',
-    'hubspot_account_id'
-  ];
-
+  const candidates = ['portal_id', 'hubspot_portal_id', 'portalid', 'account_id', 'hubspot_account_id'];
   for (const col of candidates) {
     try {
-      const { data, error } = await supabase
-        .from('installations')
-        .select('*')
-        .eq(col, portal)
-        .limit(1);
-
-      // If PostgREST says "column does not exist", skip to next candidate
+      const { data, error } = await supabase.from('installations').select('*').eq(col, portal).limit(1);
       if (error) {
         const msg = String(error.message || '').toLowerCase();
-        if (msg.includes('column') && msg.includes('does not exist')) {
-          continue;
-        }
-        // Other errors should stop
+        if (msg.includes('column') && msg.includes('does not exist')) continue;
         throw error;
       }
-
-      if (data && data.length) {
-        return { row: data[0], matchedColumn: col };
-      }
+      if (data && data.length) return { row: data[0], matchedColumn: col };
     } catch (e) {
       const msg = String(e.message || '').toLowerCase();
-      if (msg.includes('column') && msg.includes('does not exist')) {
-        continue;
-      }
+      if (msg.includes('column') && msg.includes('does not exist')) continue;
       throw e;
     }
   }
-
   return { row: null, matchedColumn: null };
 }
 
@@ -123,9 +117,7 @@ async function getValidAccessToken(portal_id_input) {
   if (!portal) throw new Error('Portal id is empty in job.');
 
   const { row: inst, matchedColumn } = await findInstallationByPortalId(portal);
-  if (!inst || !matchedColumn) {
-    throw new Error(`No installation found for portal=${portal}`);
-  }
+  if (!inst || !matchedColumn) throw new Error(`No installation found for portal=${portal}`);
 
   const accessToken = pick(inst, ['access_token', 'accesstoken', 'token', 'accessToken']);
   const refreshToken = pick(inst, ['refresh_token', 'refreshtoken', 'refreshToken']);
@@ -136,7 +128,6 @@ async function getValidAccessToken(portal_id_input) {
   if (accessToken && expiresAt > now) return accessToken;
   if (!refreshToken) throw new Error('Missing refresh_token, cannot refresh.');
 
-  // Refresh
   const params = new URLSearchParams();
   params.append('grant_type', 'refresh_token');
   params.append('client_id', HUBSPOT_CLIENT_ID);
@@ -159,7 +150,6 @@ async function getValidAccessToken(portal_id_input) {
   const expiresIn = token.expires_in || 1800;
   const newExpiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
 
-  // Update the same matched column to avoid unknown-column errors
   const { error: updErr } = await supabase
     .from('installations')
     .update({
@@ -450,18 +440,16 @@ function extractJobFields(job) {
 
 async function handleJob(rawJob) {
   const { job_id, portal_id, type } = extractJobFields(rawJob || {});
-
-  // If RPC returned an all-null composite, treat as no work
-  if (!job_id || !portal_id) return;
+  if (!job_id || !portal_id) return; // all-null composite → no work
 
   try {
     await updateProgress(job_id, `Job claimed on ${new Date().toISOString()}`);
 
-    // Token sanity ping is optional; we already refresh during export start
+    // Optional ping
     const accessToken = await getValidAccessToken(portal_id);
     await hsFetch(`${HUBSPOT_API_BASE}/crm/v3/properties/contacts`, {
       headers: { Authorization: `Bearer ${accessToken}` }
-    }).catch(() => {}); // non-fatal ping
+    }).catch(() => {});
 
     let results = null;
     if (type === 'contacts' || type === 'companies') {
@@ -473,28 +461,18 @@ async function handleJob(rawJob) {
     }
 
     // Store results
-    let writeOk = false;
+    let ok = false;
     {
       const { error } = await supabase
         .from('audit_jobs')
-        .update({
-          status: 'complete',
-          results,
-          completed_at: new Date().toISOString(),
-          progress_message: 'Complete'
-        })
+        .update({ status: 'complete', results, completed_at: new Date().toISOString(), progress_message: 'Complete' })
         .eq('job_id', job_id);
-      if (!error) writeOk = true;
+      if (!error) ok = true;
     }
-    if (!writeOk) {
+    if (!ok) {
       const { error } = await supabase
         .from('audit_jobs')
-        .update({
-          status: 'complete',
-          result_json: results,
-          completed_at: new Date().toISOString(),
-          progress_message: 'Complete'
-        })
+        .update({ status: 'complete', result_json: results, completed_at: new Date().toISOString(), progress_message: 'Complete' })
         .eq('job_id', job_id);
       if (error) throw new Error(`[Supabase] Failed writing results: ${error.message}`);
     }
@@ -504,11 +482,7 @@ async function handleJob(rawJob) {
     console.error(`[Worker] Job ${job_id || 'unknown'} failed:`, err.message);
     await supabase
       .from('audit_jobs')
-      .update({
-        status: 'failed',
-        error: err.message.slice(0, 800),
-        progress_message: 'Failed'
-      })
+      .update({ status: 'failed', error: err.message.slice(0, 800), progress_message: 'Failed' })
       .eq('job_id', job_id || '00000000-0000-0000-0000-000000000000')
       .then(() => null)
       .catch(() => null);
