@@ -201,10 +201,15 @@ async function extendLease(job_id, minutes = 15) {
 
 // =============== HUBSPOT EXPORT HELPERS ===============
 async function startExport(objectType, accessToken) {
+  const payload = {
+    exportType: 'CSV',
+    format: 'CSV',
+    objectType: objectType === 'contacts' ? 'CONTACT' : objectType === 'companies' ? 'COMPANY' : objectType.toUpperCase()
+  };
   const res = await hsFetch(`${HUBSPOT_API_BASE}/crm/v3/exports/export/async`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json;charset=utf-8' },
-    body: JSON.stringify({ exportType: 'CSV', format: 'CSV', objectType })
+    body: JSON.stringify(payload)
   });
   const json = await res.json();
   if (!json || !json.id) throw new Error('Export start did not return id.');
@@ -220,11 +225,13 @@ async function waitForExportReady(taskId, accessToken, job_id) {
     const json = await res.json();
     const state = (json.state || json.status || '').toString().toUpperCase();
 
-    if (state === 'CANCELED' || state === 'FAILED')
+    if (state === 'CANCELED' || state === 'FAILED') {
       throw new Error(`Export task failed: ${JSON.stringify(json).slice(0, 400)}`);
+    }
 
-    if ((state === 'COMPLETED' || state === 'COMPLETE') && json?.result?.url)
+    if ((state === 'COMPLETED' || state === 'COMPLETE') && json?.result?.url) {
       return { downloadUrl: json.result.url, total: json?.result?.rowCount || null };
+    }
 
     const pct = json?.progress?.percentage || null;
     const msg = pct != null ? `Export preparing at ${pct}%` : 'Export preparing...';
@@ -233,7 +240,6 @@ async function waitForExportReady(taskId, accessToken, job_id) {
   }
 }
 
-// =============== CSV STREAM & KPIs ===============
 function normalizeEmail(e) { return (e || '').trim().toLowerCase(); }
 function normalizeDomain(d) { return (d || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, ''); }
 function normalizePhone(p) { return (p || '').replace(/\D+/g, ''); }
@@ -246,38 +252,66 @@ function parseMaybeDate(v) {
 }
 function isValidEmailSimple(e) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e || ''); }
 
+function registerDuplicate(groupMap, key, type, snapshot) {
+  let group = groupMap.get(key);
+  if (!group) {
+    group = { key, type, count: 0, records: [] };
+    groupMap.set(key, group);
+  }
+  group.count += 1;
+  if (group.records.length < DUP_SAMPLE_PER_KEY) {
+    group.records.push(snapshot);
+  }
+}
+
 async function processCsvStream({ res, objectType, job_id }) {
   return new Promise((resolve, reject) => {
     const parser = parse({ columns: true, skip_empty_lines: true });
 
-    let total = 0, enrichedCount = 0;
+    let totalRecords = 0;
+    let enrichedCount = 0;
     const fillCounts = new Map();
     const uniqueProps = new Set();
-    let ownerlessCount = 0, lifecycleMissing = 0, invalidEmailCount = 0, staleCount = 0;
-    const STALE_DAYS = 180, staleCutoff = new Date(Date.now() - STALE_DAYS * 86400000);
+    let ownerlessCount = 0;
+    let lifecycleMissing = 0;
+    let invalidEmailCount = 0;
+    let staleCount = 0;
+    const STALE_DAYS = 180;
+    const staleCutoff = new Date(Date.now() - STALE_DAYS * 86400000);
 
     const orphanedRecords = [];
-    const seenEmail = new Map(), seenDomain = new Map(), seenPhone = new Map();
-    const duplicateSummary = { byEmail: 0, byDomain: 0, byPhone: 0 };
+    const duplicateGroups = new Map();
 
     const heartbeat = setInterval(() => extendLease(job_id).catch(() => {}), HEARTBEAT_MS);
 
-    res.body.on('error', err => { clearInterval(heartbeat); reject(err); })
+    res.body
+      .on('error', err => {
+        clearInterval(heartbeat);
+        reject(err);
+      })
       .pipe(parser)
       .on('data', async row => {
-        total++;
+        totalRecords++;
 
-        if (total % PROGRESS_EVERY_N === 0)
-          await updateProgress(job_id, `Processing ${total.toLocaleString()} records...`, total, null);
+        if (totalRecords % PROGRESS_EVERY_N === 0) {
+          await updateProgress(job_id, `Processing ${totalRecords.toLocaleString()} records...`, totalRecords, null);
+        }
 
-        Object.keys(row).forEach(k => uniqueProps.add(k));
-        for (const [k, v] of Object.entries(row))
-          if (v !== '' && v != null) fillCounts.set(k, (fillCounts.get(k) || 0) + 1);
+        const properties = {};
+        for (const [key, value] of Object.entries(row)) {
+          uniqueProps.add(key);
+          properties[key] = value;
+          if (value !== '' && value != null) {
+            fillCounts.set(key, (fillCounts.get(key) || 0) + 1);
+          }
+        }
 
-        const recordId = row['Record ID'] || row['record_id'] || row['hs_object_id'];
-        const ownerId = row['hubspot_owner_id'] || row['owner_id'] || '';
+        const recordId = row['Record ID'] || row['record_id'] || row['hs_object_id'] || row['objectId'];
+        const snapshot = { id: recordId, properties };
+
+        const ownerId = row['hubspot_owner_id'] || row['owner_id'] || row['hs_owner_id'] || '';
         if (!ownerId) ownerlessCount++;
-        const lifecycle = row['lifecyclestage'] || '';
+        const lifecycle = row['lifecyclestage'] || row['lifecycle_stage'] || row['Lifecycle Stage'] || '';
         if (!lifecycle) lifecycleMissing++;
         const mod = parseMaybeDate(row['hs_lastmodified_date'] || row['lastmodifieddate'] || row['Last Modified Date']);
         if (mod && mod < staleCutoff) staleCount++;
@@ -286,38 +320,27 @@ async function processCsvStream({ res, objectType, job_id }) {
           const email = normalizeEmail(row.email || row['Email']);
           if (email && !isValidEmailSimple(email)) invalidEmailCount++;
 
-          const assocCompany = row.associatedcompanyid || row['Associated Company ID'] || '';
-          if (!assocCompany && orphanedRecords.length < SAMPLE_CAP_PER_LIST && enrichedCount < MAX_RECORDS_ENRICHED)
-            orphanedRecords.push({ id: recordId, email });
+          const assocCompany = row.associatedcompanyid || row['Associated Company ID'] || row['associatedCompanyId'] || '';
+          if (!assocCompany && orphanedRecords.length < SAMPLE_CAP_PER_LIST && enrichedCount < MAX_RECORDS_ENRICHED) {
+            orphanedRecords.push(snapshot);
+          }
 
           if (email) {
-            const e = seenEmail.get(email) || { count: 0, records: [] };
-            e.count++;
-            if (e.records.length < DUP_SAMPLE_PER_KEY && enrichedCount < MAX_RECORDS_ENRICHED)
-              e.records.push({ id: recordId, email });
-            seenEmail.set(email, e);
+            registerDuplicate(duplicateGroups, `email:${email}`, 'email', snapshot);
           }
 
           const phone = normalizePhone(row.phone || row['Phone Number'] || row['phone']);
           if (phone) {
-            const p = seenPhone.get(phone) || { count: 0, records: [] };
-            p.count++;
-            if (p.records.length < DUP_SAMPLE_PER_KEY && enrichedCount < MAX_RECORDS_ENRICHED)
-              p.records.push({ id: recordId, phone });
-            seenPhone.set(phone, p);
+            registerDuplicate(duplicateGroups, `phone:${phone}`, 'phone', snapshot);
           }
-        } else {
-          const numAssoc = Number(row.num_associated_contacts || row['Number of Associated Contacts'] || 0);
-          if (!numAssoc && orphanedRecords.length < SAMPLE_CAP_PER_LIST && enrichedCount < MAX_RECORDS_ENRICHED)
-            orphanedRecords.push({ id: recordId });
-
-          const domain = normalizeDomain(row.domain || row['Company Domain Name'] || '');
+        } else if (objectType === 'companies') {
+          const assoc = Number(row.num_associated_contacts || row['Number of Associated Contacts'] || row['associated_contacts'] || 0);
+          if (!assoc && orphanedRecords.length < SAMPLE_CAP_PER_LIST && enrichedCount < MAX_RECORDS_ENRICHED) {
+            orphanedRecords.push(snapshot);
+          }
+          const domain = normalizeDomain(row.domain || row['Company Domain Name'] || row['company_domain']);
           if (domain) {
-            const d = seenDomain.get(domain) || { count: 0, records: [] };
-            d.count++;
-            if (d.records.length < DUP_SAMPLE_PER_KEY && enrichedCount < MAX_RECORDS_ENRICHED)
-              d.records.push({ id: recordId, domain });
-            seenDomain.set(domain, d);
+            registerDuplicate(duplicateGroups, `domain:${domain}`, 'domain', snapshot);
           }
         }
 
@@ -326,48 +349,57 @@ async function processCsvStream({ res, objectType, job_id }) {
       .on('end', async () => {
         clearInterval(heartbeat);
 
-        for (const [, v] of seenEmail) if (v.count > 1) duplicateSummary.byEmail += v.count;
-        for (const [, v] of seenDomain) if (v.count > 1) duplicateSummary.byDomain += v.count;
-        for (const [, v] of seenPhone) if (v.count > 1) duplicateSummary.byPhone += v.count;
-
-        const fillRates = [];
-        for (const prop of uniqueProps) {
-          const count = fillCounts.get(prop) || 0;
-          fillRates.push({ property: prop, filled: count, fillRate: total ? count / total : 0 });
+        let totalDuplicates = 0;
+        const duplicateRecords = [];
+        const duplicateRecordIds = new Set();
+        for (const group of duplicateGroups.values()) {
+          if (group.count <= 1) continue;
+          totalDuplicates += group.count - 1;
+          for (const record of group.records) {
+            if (!record || !record.id || duplicateRecordIds.has(record.id)) continue;
+            duplicateRecordIds.add(record.id);
+            duplicateRecords.push(record);
+            if (duplicateRecords.length >= SAMPLE_CAP_PER_LIST) break;
+          }
+          if (duplicateRecords.length >= SAMPLE_CAP_PER_LIST) break;
         }
-        fillRates.sort((a, b) => a.fillRate - b.fillRate);
 
         resolve({
-          totals: { totalRecords: total },
-          counts: {
-            ownerless: ownerlessCount,
-            lifecycleMissing,
-            invalidEmails: objectType === 'contacts' ? invalidEmailCount : null,
-            staleRecords: staleCount
-          },
-          orphaned: { sample: orphanedRecords },
-          duplicates: {
-            summary: duplicateSummary,
-            samples: {
-              byEmail: Array.from(seenEmail.entries()).filter(([, v]) => v.count > 1).slice(0, 100)
-                .map(([value, v]) => ({ value, count: v.count, sample: v.records })),
-              byDomain: Array.from(seenDomain.entries()).filter(([, v]) => v.count > 1).slice(0, 100)
-                .map(([value, v]) => ({ value, count: v.count, sample: v.records })),
-              byPhone: Array.from(seenPhone.entries()).filter(([, v]) => v.count > 1).slice(0, 100)
-                .map(([value, v]) => ({ value, count: v.count, sample: v.records }))
-            }
-          },
-          properties: { fillRates, top20Sparsest: fillRates.slice(0, 20) }
+          totalRecords,
+          fillCounts,
+          uniqueProps,
+          orphanedRecords,
+          duplicateRecords,
+          duplicateGroups,
+          totalDuplicates,
+          ownerlessCount,
+          lifecycleMissing,
+          invalidEmailCount,
+          staleCount
         });
       })
-      .on('error', err => { clearInterval(heartbeat); reject(err); });
+      .on('error', err => {
+        clearInterval(heartbeat);
+        reject(err);
+      });
   });
+}
+
+async function fetchPropertyMetadata(objectType, accessToken) {
+  const res = await hsFetch(`${HUBSPOT_API_BASE}/crm/v3/properties/${objectType}`, {
+    headers: { Authorization: `Bearer ${accessToken}` }
+  });
+  const json = await res.json();
+  return Array.isArray(json?.results) ? json.results : [];
 }
 
 // =============== WORKFLOW AUDIT =================
 async function performWorkflowAudit({ portal_id, accessToken, job_id }) {
   await updateProgress(job_id, 'Fetching workflows...');
-  const results = { totalWorkflows: 0, risks: { exposedApiKeys: [], deprecatedEmailV1: [] } };
+  let totalWorkflows = 0;
+  let inactiveWorkflows = 0;
+  let noEnrollmentWorkflows = 0;
+  const findings = [];
   let after = undefined;
 
   while (true) {
@@ -378,23 +410,60 @@ async function performWorkflowAudit({ portal_id, accessToken, job_id }) {
     const json = await res.json();
 
     const workflows = json.results || json.workflows || [];
-    results.totalWorkflows += workflows.length;
+    totalWorkflows += workflows.length;
 
     for (const wf of workflows) {
+      if (wf.enabled === false) inactiveWorkflows++;
+      const enrolled = wf.currentlyEnrolledCount ?? wf.enrollmentCount ?? wf.stats?.enrolledCount ?? null;
+      if (enrolled === 0) noEnrollmentWorkflows++;
+
       const actions = wf.actions || [];
-      for (const a of actions) {
-        const blob = JSON.stringify(a).toLowerCase();
-        if (/hapikey=/.test(blob)) results.risks.exposedApiKeys.push({ workflowId: wf.id, name: wf.name });
-        if (/marketing-emails[\/\\]v1[\/\\]emails/.test(blob)) results.risks.deprecatedEmailV1.push({ workflowId: wf.id, name: wf.name });
+      for (const action of actions) {
+        const serialized = JSON.stringify(action || {}).toLowerCase();
+        const common = {
+          workflow_id: wf.id,
+          workflow_name: wf.name || 'Unnamed workflow',
+          action_type: action.type || action.actionType || 'action',
+          last_updated: wf.updatedAt || wf.updated_at || wf.updatedOn || wf.lastUpdated || null
+        };
+
+        if (serialized.includes('hapikey=')) {
+          findings.push({
+            ...common,
+            finding: 'Exposed hapikey parameter',
+            details: action.name || 'Custom code / webhook contains hapikey='
+          });
+        }
+        if (serialized.includes('marketing-emails') && serialized.includes('/v1/')) {
+          findings.push({
+            ...common,
+            finding: 'Legacy Marketing Email API',
+            details: action.name || 'Action references deprecated v1 Marketing Email API'
+          });
+        }
       }
     }
 
     after = json.paging?.next?.after;
     if (!after) break;
-    await updateProgress(job_id, `Workflows fetched: ${results.totalWorkflows}`);
+    await updateProgress(job_id, `Workflows fetched: ${totalWorkflows}`);
   }
 
-  return results;
+  const payload = {
+    auditType: 'workflows',
+    kpis: {
+      totalWorkflows,
+      inactiveWorkflows,
+      noEnrollmentWorkflows,
+      isIncomplete: false
+    },
+    results: findings.map(item => ({
+      ...item,
+      last_updated: item.last_updated ? new Date(item.last_updated).toISOString() : 'Unknown'
+    }))
+  };
+
+  return payload;
 }
 
 // =============== CRM AUDIT ======================
@@ -411,20 +480,53 @@ async function performCrmAudit({ portal_id, objectType, job_id }) {
   await updateProgress(job_id, `Processing ${objectType} CSV...`);
   const kpis = await processCsvStream({ res, objectType, job_id });
 
-  await updateProgress(job_id, `Finalizing ${objectType} audit...`, kpis.totals.totalRecords, kpis.totals.totalRecords);
+  const propertyMeta = await fetchPropertyMetadata(objectType, accessToken).catch(() => []);
+  const metaMap = new Map();
+  propertyMeta.forEach(meta => metaMap.set(meta.name, meta));
 
-  return {
+  const properties = [];
+  for (const prop of kpis.uniqueProps) {
+    const meta = metaMap.get(prop) || {};
+    const fillCount = kpis.fillCounts.get(prop) || 0;
+    const fillRate = kpis.totalRecords ? Math.round((fillCount / kpis.totalRecords) * 100) : 0;
+    properties.push({
+      label: meta.label || prop,
+      internalName: prop,
+      type: meta.type || meta.fieldType || 'string',
+      description: meta.description || '',
+      isCustom: meta.hubspotDefined === false ? true : false,
+      fillCount,
+      fillRate
+    });
+  }
+
+  const customProps = properties.filter(p => p.isCustom);
+  const avgCustomFillRate = customProps.length
+    ? Number((customProps.reduce((sum, p) => sum + p.fillRate, 0) / customProps.length).toFixed(1))
+    : 0;
+
+  const payload = {
+    auditType: 'crm',
     objectType,
-    totals: kpis.totals,
-    counts: kpis.counts,
-    orphaned: kpis.orphaned,
-    duplicates: kpis.duplicates,
-    properties: kpis.properties,
-    meta: {
-      processedCap: MAX_RECORDS_ENRICHED,
-      sampleCaps: { perList: SAMPLE_CAP_PER_LIST, dupPerKey: DUP_SAMPLE_PER_KEY }
+    data: {
+      totalRecords: kpis.totalRecords,
+      limitHit: false,
+      totalProperties: properties.length,
+      averageCustomFillRate: avgCustomFillRate,
+      properties: properties.sort((a, b) => a.label.localeCompare(b.label)),
+      orphanedRecords: kpis.orphanedRecords,
+      duplicateRecords: kpis.duplicateRecords,
+      totalDuplicates: kpis.totalDuplicates,
+      metrics: {
+        ownerless: kpis.ownerlessCount,
+        lifecycleMissing: kpis.lifecycleMissing,
+        invalidEmails: objectType === 'contacts' ? kpis.invalidEmailCount : null,
+        staleRecords: kpis.staleCount
+      }
     }
   };
+
+  return { payload, totals: kpis.totalRecords };
 }
 
 // =============== JOB HANDLER ====================
@@ -438,6 +540,10 @@ function extractJobFields(job) {
   return { job_id, portal_id, type };
 }
 
+async function performWorkflowJob(job, accessToken) {
+  return performWorkflowAudit({ portal_id: job.portal_id, accessToken, job_id: job.job_id });
+}
+
 async function handleJob(rawJob) {
   const { job_id, portal_id, type } = extractJobFields(rawJob || {});
   if (!job_id || !portal_id) return; // all-null composite → no work
@@ -445,38 +551,32 @@ async function handleJob(rawJob) {
   try {
     await updateProgress(job_id, `Job claimed on ${new Date().toISOString()}`);
 
-    // Optional ping
-    const accessToken = await getValidAccessToken(portal_id);
-    await hsFetch(`${HUBSPOT_API_BASE}/crm/v3/properties/contacts`, {
-      headers: { Authorization: `Bearer ${accessToken}` }
-    }).catch(() => {});
-
-    let results = null;
+    let payload;
+    let totals = null;
     if (type === 'contacts' || type === 'companies') {
-      results = await performCrmAudit({ portal_id, objectType: type, job_id });
+      const outcome = await performCrmAudit({ portal_id, objectType: type, job_id });
+      payload = outcome.payload;
+      totals = outcome.totals;
     } else if (type === 'workflows') {
-      results = await performWorkflowAudit({ portal_id, accessToken, job_id });
+      const accessToken = await getValidAccessToken(portal_id);
+      payload = await performWorkflowJob({ job_id, portal_id }, accessToken);
     } else {
       throw new Error(`Unsupported object_type: ${type}`);
     }
 
-    // Store results
-    let ok = false;
-    {
-      const { error } = await supabase
-        .from('audit_jobs')
-        .update({ status: 'complete', results, completed_at: new Date().toISOString(), progress_message: 'Complete' })
-        .eq('job_id', job_id);
-      if (!error) ok = true;
-    }
-    if (!ok) {
-      const { error } = await supabase
-        .from('audit_jobs')
-        .update({ status: 'complete', result_json: results, completed_at: new Date().toISOString(), progress_message: 'Complete' })
-        .eq('job_id', job_id);
-      if (error) throw new Error(`[Supabase] Failed writing results: ${error.message}`);
-    }
+    const { error } = await supabase
+      .from('audit_jobs')
+      .update({
+        status: 'complete',
+        result_json: payload,
+        completed_at: new Date().toISOString(),
+        progress_message: 'Complete',
+        processed_records: totals || null,
+        total_records: totals || null
+      })
+      .eq('job_id', job_id);
 
+    if (error) throw new Error(`[Supabase] Failed writing results: ${error.message}`);
     console.log(`[Worker] Job ${job_id} complete.`);
   } catch (err) {
     console.error(`[Worker] Job ${job_id || 'unknown'} failed:`, err.message);
