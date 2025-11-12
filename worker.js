@@ -74,6 +74,7 @@ async function refreshAccessToken(refreshToken) {
     const text = await res.text().catch(() => '');
     throw new Error(`[HubSpot OAuth] refresh failed: ${res.status} ${res.statusText} ${text.slice(0, 400)}`);
   }
+  if (!install.refresh_token) throw new Error('Installation is missing a refresh_token');
 
   return res.json();
 }
